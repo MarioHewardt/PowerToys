@@ -1813,7 +1813,7 @@ struct StitchPerfCounters
     __int64 tMaskedFallback;    // Full-res masked coarse fallback
 
     StitchPerfCounters() { Reset(); QueryPerformanceFrequency( &freqQpc ); }
-    void Reset() { memset( &totalCalls, 0, (char*)(&tMaskedFallback + 1) - (char*)&totalCalls ); }
+    void Reset() { memset( &totalCalls, 0, reinterpret_cast<char*>(&tMaskedFallback + 1) - reinterpret_cast<char*>(&totalCalls) ); }
 
     double UsFromTicks( __int64 ticks ) const
     {
@@ -2129,7 +2129,7 @@ static void DumpPanoramaText( const std::wstring& debugDumpDirectory,
 #ifdef _DEBUG
 static HBITMAP LoadBitmapFromFile( const std::filesystem::path& filePath )
 {
-    return reinterpret_cast<HBITMAP>( LoadImageW( nullptr,
+    return static_cast<HBITMAP>( LoadImageW( nullptr,
                                                   filePath.c_str(),
                                                   IMAGE_BITMAP,
                                                   0,
@@ -4914,13 +4914,12 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
         std::vector<BYTE> dilatedCurr( dsMaskCurr.size(), 0 );
         for( int y = 1; y < dsH - 1; ++y )
         {
-            const int rowOff = y * dsW;
             int x = 1;
 #if defined(_M_ARM64)
             const uint8x16_t vOne = vdupq_n_u8( 1 );
             for( ; x + 16 < dsW - 1; x += 16 )
             {
-                const int idx = rowOff + x;
+                const int idx = y * dsW + x;
                 // Previous mask: OR of center, left, right, up, down.
                 uint8x16_t pOr = vld1q_u8( dsMaskPrev.data() + idx );
                 pOr = vorrq_u8( pOr, vld1q_u8( dsMaskPrev.data() + idx - 1 ) );
@@ -5207,7 +5206,7 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
     }
     PERF_STOP( tCoarseSearch );
 
-    // Full-resolution masked coarse fallback 
+    // Full-resolution masked coarse fallback
     PERF_START( tMaskedFallback );
     // When all coarse candidates have score 0 (or the coarse search
     // produced zero candidates because VLE masking left < 20 samples
@@ -5764,7 +5763,7 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
     }
     PERF_STOP( tProbeInject );
 
-    // Phase 2: Rank candidates by full-resolution comparison 
+    // Phase 2: Rank candidates by full-resolution comparison
     PERF_START( tFineSearch );
     // For each coarse candidate, compute a fine score at full resolution.
     // This resolves ambiguity from harmonic matches on repetitive content
@@ -6256,18 +6255,19 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
         }
         else if( rankScore == bestFineRankScore )
         {
+            const int absStepLo = abs( dy );
             const int absDx = abs( dx );
-            const int expectedDelta = ( expectedAbsStep > 0 ) ? abs( absStep - expectedAbsStep ) : ( std::numeric_limits<int>::max )();
+            const int expectedDelta = ( expectedAbsStep > 0 ) ? abs( absStepLo - expectedAbsStep ) : ( std::numeric_limits<int>::max )();
 
             if( ( expectedAbsStep > 0 && expectedDelta < bestExpectedDelta ) ||
-                ( expectedAbsStep == 0 && absStep < bestAbsStep ) ||
+                ( expectedAbsStep == 0 && absStepLo < bestAbsStep ) ||
                 ( expectedDelta == bestExpectedDelta &&
-                  ( absStep < bestAbsStep || ( absStep == bestAbsStep && absDx < bestAbsDx ) ) ) )
+                  ( absStep < bestAbsStep || ( absStepLo == bestAbsStep && absDx < bestAbsDx ) ) ) )
             {
                 bestDx = dx;
                 bestDy = dy;
                 bestCoarseDy = candidates[ci].dyDs;
-                bestAbsStep = absStep;
+                bestAbsStep = absStepLo;
                 bestAbsDx = absDx;
                 bestExpectedDelta = expectedDelta;
             }
@@ -6275,8 +6275,9 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
         else if( expectedAbsStep > 0 && bestFineRankScore != ( std::numeric_limits<unsigned __int64>::max )() )
         {
             unsigned __int64 scoreSlack = (std::max)( static_cast<unsigned __int64>( 2 ), bestFineRankScore / 80 );
+            const int absStepLo = abs( dy );
             const int absDx = abs( dx );
-            const int expectedDelta = abs( absStep - expectedAbsStep );
+            const int expectedDelta = abs( absStepLo - expectedAbsStep );
             const bool preferExpectedStep = ( highConstantFractionPair || expectedAbsStep >= frameHeight / 4 ) &&
                 expectedAbsStep >= 8;
 
@@ -6299,7 +6300,7 @@ static bool FindBestFrameShiftVerticalOnly( const std::vector<BYTE>& previousPix
                 bestDx = dx;
                 bestDy = dy;
                 bestCoarseDy = candidates[ci].dyDs;
-                bestAbsStep = absStep;
+                bestAbsStep = absStepLo;
                 bestAbsDx = absDx;
                 bestExpectedDelta = expectedDelta;
             }
@@ -6927,6 +6928,19 @@ static bool FindBestFrameShift( const std::vector<BYTE>& previousPixels,
 
     if( transposedOk && !directOk )
     {
+        // On portrait portals (height >= 2*width), a transposed-only
+        // success is likely spurious horizontal autocorrelation from
+        // text/code line structure.  Small initial shifts can cause the
+        // direct (vertical) fine score to barely exceed the threshold
+        // while the transposed search passes.  Defer axis detection to
+        // a frame pair with more distinctive scroll movement.
+        if( frameHeight >= frameWidth * 2 )
+        {
+            StitchLog( L"[Panorama/Stitch] FindBestFrameShift portrait-portal transposed-only deferred: "
+                       L"mapped=(%d,%d) frame=%dx%d\n",
+                       mappedDx, mappedDy, frameWidth, frameHeight );
+            return false;
+        }
         bestDx = mappedDx;
         bestDy = mappedDy;
         return true;
@@ -15423,6 +15437,153 @@ bool RunPanoramaStitchSelfTest()
                         if( result < 0 ) focusResult = L"INFRA";
                         else if( result == 1 ) focusResult = L"PASS";
                         TestLog( L"[Panorama/Test] Stress focus result: %s => %s\n", nsName, focusResult );
+                        if( stressStopAfterFocus )
+                            stressEarlyExit = true;
+                    }
+                }
+            }
+        }
+
+        // Regression for panorama_20260313: narrow portrait strip (368x1134)
+        // with tiny initial steps (4 px).  The direct (vertical) fine search
+        // barely exceeds its threshold while the transposed (horizontal)
+        // search passes, causing the code to lock the axis to horizontal on
+        // the very first frame pair.
+        if( !stressEarlyExit )
+        {
+            const wchar_t* ssName = L"stress-vertical-narrowstrip-smallstart-axisflip";
+            if( stressScenarioMatches( ssName ) )
+            {
+                if( stressFocusEnabled )
+                    stressFocusMatched = true;
+
+                const int ssW = 368;
+                const int ssWinH = 1134;
+                const int ssH = 16000;
+                std::vector<BYTE> ssPx( static_cast<size_t>( ssW ) * ssH * 4, 0 );
+
+                // Light background matching typical IDE/browser content.
+                for( size_t pi = 0; pi < static_cast<size_t>( ssW ) * ssH; ++pi )
+                {
+                    ssPx[pi * 4 + 0] = 245;
+                    ssPx[pi * 4 + 1] = 245;
+                    ssPx[pi * 4 + 2] = 245;
+                    ssPx[pi * 4 + 3] = 255;
+                }
+
+                // Repeating horizontal bands every ~19 px emulate text lines
+                // with strong horizontal autocorrelation.
+                for( int y0 = 0; y0 < ssH; y0 += 19 )
+                {
+                    for( int yy = y0; yy < min( ssH, y0 + 2 ); ++yy )
+                    {
+                        for( int x = 0; x < ssW; ++x )
+                        {
+                            const size_t idx = ( static_cast<size_t>( yy ) * ssW + x ) * 4;
+                            ssPx[idx + 0] = 200;
+                            ssPx[idx + 1] = 200;
+                            ssPx[idx + 2] = 200;
+                        }
+                    }
+                }
+
+                // Sparse deterministic anchors: small "glyphs" at irregular
+                // intervals along the strip prevent total ambiguity.
+                for( int y = 11; y < ssH - 4; y += 97 )
+                {
+                    const int x0 = 8 + ( ( y * 41 ) % max( 1, ssW - 20 ) );
+                    for( int dy = 0; dy < 3; ++dy )
+                    {
+                        for( int dx = 0; dx < 3; ++dx )
+                        {
+                            const int xx = min( x0 + dx, ssW - 1 );
+                            const int yy = y + dy;
+                            const size_t idx = ( static_cast<size_t>( yy ) * ssW + xx ) * 4;
+                            ssPx[idx + 0] = 60;
+                            ssPx[idx + 1] = 60;
+                            ssPx[idx + 2] = 65;
+                        }
+                    }
+                }
+
+                // Reproduce the capture cadence: tiny 4 px initial steps that
+                // stress the fine-score threshold, then a jump to normal speed.
+                std::vector<int> ssOrigins;
+                ssOrigins.push_back( 0 );
+                int sy = 0;
+                const int ssSteps[] = {
+                    4, 4, 4, 4, 61, 60, 61, 60,
+                    60, 58, 58, 58, 58, 58, 58, 58,
+                    58, 56, 61, 60, 58, 58, 58, 56,
+                    56, 54, 54, 54, 54, 50, 50, 50,
+                    50, 50, 50, 50, 50, 50, 50, 50,
+                    50, 50, 50, 50
+                };
+                size_t ssi = 0;
+                while( ssOrigins.size() < 120 )
+                {
+                    const int step = ssSteps[ssi % _countof( ssSteps )];
+                    ssi++;
+                    const int nextY = sy + step;
+                    if( nextY + ssWinH > ssH )
+                        break;
+                    sy = nextY;
+                    ssOrigins.push_back( sy );
+                }
+
+                if( ssOrigins.size() >= 12 )
+                {
+                    // Verify axis detection for the first frame pair.
+                    std::vector<BYTE> firstFrame( static_cast<size_t>( ssW ) * ssWinH * 4 );
+                    std::vector<BYTE> secondFrame( static_cast<size_t>( ssW ) * ssWinH * 4 );
+                    for( int row = 0; row < ssWinH; ++row )
+                    {
+                        const size_t srcOff0 = static_cast<size_t>( ssOrigins[0] + row ) * ssW * 4;
+                        const size_t srcOff1 = static_cast<size_t>( ssOrigins[1] + row ) * ssW * 4;
+                        const size_t dstOff = static_cast<size_t>( row ) * ssW * 4;
+                        memcpy( firstFrame.data() + dstOff, ssPx.data() + srcOff0, static_cast<size_t>( ssW ) * 4 );
+                        memcpy( secondFrame.data() + dstOff, ssPx.data() + srcOff1, static_cast<size_t>( ssW ) * 4 );
+                    }
+                    int startupDx = 0, startupDy = 0;
+                    const bool startupFound = FindBestFrameShift( firstFrame, secondFrame,
+                                                                  ssW, ssWinH,
+                                                                  0, 0,
+                                                                  startupDx, startupDy, false );
+                    // The first pair must detect vertical axis (dx==0, dy!=0).
+                    // Before the fix, FindBestFrameShift returned dx!=0 here.
+                    const bool startupVertical = startupFound
+                                                 ? ( startupDx == 0 && startupDy != 0 )
+                                                 : true;  // deferred is also OK
+
+                    stressTestsRun++;
+                    const int rawResult = stitchAndCompare( ssName, ssPx, ssW, ssH, ssOrigins, ssWinH );
+                    const size_t composedCount = countComposedVertical( ssPx, ssW, ssH, ssOrigins, ssWinH );
+                    const bool resultPass = startupVertical && rawResult == 1 && composedCount == ssOrigins.size();
+                    wchar_t msg[512]{};
+                    if( resultPass )
+                    {
+                        stressTestsPassed++;
+                        TestLog( L"  [%d] %s PASSED startup=(%d,%d) composed=%zu/%zu\n",
+                                 stressTestsRun, ssName, startupDx, startupDy, composedCount, ssOrigins.size() );
+                        swprintf_s( msg, L"PASS: %s (startup=%d,%d composed=%zu/%zu)\n",
+                                    ssName, startupDx, startupDy, composedCount, ssOrigins.size() );
+                    }
+                    else
+                    {
+                        TestLog( L"***** FAIL: %s startupFound=%d startup=(%d,%d) composed=%zu/%zu raw=%d *****\n",
+                                 ssName, startupFound ? 1 : 0, startupDx, startupDy,
+                                 composedCount, ssOrigins.size(), rawResult );
+                        swprintf_s( msg, L"FAIL: %s (startupFound=%d startup=%d,%d composed=%zu/%zu raw=%d)\n",
+                                    ssName, startupFound ? 1 : 0, startupDx, startupDy,
+                                    composedCount, ssOrigins.size(), rawResult );
+                        stressFailLog += msg;
+                    }
+                    stressLog += msg;
+
+                    if( stressFocusEnabled )
+                    {
+                        TestLog( L"[Panorama/Test] Stress focus result: %s => %s\n",
+                                 ssName, resultPass ? L"PASS" : L"FAIL" );
                         if( stressStopAfterFocus )
                             stressEarlyExit = true;
                     }
