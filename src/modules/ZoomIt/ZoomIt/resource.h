@@ -115,6 +115,13 @@
 #define IDC_MICROPHONE_LABEL            1109
 #define IDC_TRIM_FILE                   1110
 #define IDC_CHECK_LOCK_WORKSTATION      1113
+#define IDC_WEBCAM_OVERLAY              1115
+#define IDC_WEBCAM_DEVICE               1116
+#define IDC_WEBCAM_POSITION             1117
+#define IDC_WEBCAM_SIZE                 1118
+#define IDC_WEBCAM_DEVICE_LABEL         1119
+#define IDC_WEBCAM_POSITION_LABEL       1120
+#define IDC_WEBCAM_SIZE_LABEL           1121
 #define IDC_SAVE                        40002
 #define IDC_COPY                        40004
 #define IDC_RECORD                      40006
@@ -130,7 +137,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        120
 #define _APS_NEXT_COMMAND_VALUE         40015
-#define _APS_NEXT_CONTROL_VALUE         1115
+#define _APS_NEXT_CONTROL_VALUE         1122
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

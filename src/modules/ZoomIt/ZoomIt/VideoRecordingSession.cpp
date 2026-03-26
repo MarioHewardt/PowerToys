@@ -24,6 +24,10 @@ extern DWORD g_RecordScaling;
 extern DWORD g_TrimDialogWidth;
 extern DWORD g_TrimDialogHeight;
 extern DWORD g_TrimDialogVolume;
+extern BOOLEAN g_WebcamOverlay;
+extern DWORD g_WebcamPosition;
+extern DWORD g_WebcamSize;
+extern TCHAR g_WebcamDeviceSymLink[MAX_PATH];
 extern class ClassRegistry reg;
 extern REG_SETTING RegSettings[];
 extern HINSTANCE g_hInstance;
@@ -865,6 +869,10 @@ VideoRecordingSession::VideoRecordingSession(
     m_device = device;
     m_d3dDevice = GetDXGIInterfaceFromObject<ID3D11Device>(m_device);
     m_d3dDevice->GetImmediateContext(m_d3dContext.put());
+    if (auto multithread = m_d3dContext.try_as<ID3D11Multithread>())
+    {
+        multithread->SetMultithreadProtected(TRUE);
+    }
     m_item = item;
     auto itemSize = item.Size();
     auto inputWidth = EnsureEven(itemSize.Width);
@@ -958,12 +966,28 @@ VideoRecordingSession::VideoRecordingSession(
         static_cast<uint32_t>(m_rcCrop.bottom - m_rcCrop.top),
         DXGI_FORMAT_B8G8R8A8_UNORM,
         2);
-    winrt::com_ptr<ID3D11Texture2D> backBuffer;
-    winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
-    winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, m_renderTargetView.put()));
 
     // Always create audio generator for loopback capture; captureAudio controls microphone
     m_audioGenerator = std::make_unique<AudioSampleGenerator>(captureAudio, captureSystemAudio);
+
+    // Create webcam capture if enabled.
+    {
+        wchar_t dbg[256];
+        swprintf_s( dbg, L"[WebcamCapture] g_WebcamOverlay=%d outputW=%d outputH=%d\n",
+                     static_cast<int>( g_WebcamOverlay ), outputWidth, outputHeight );
+        OutputDebugStringW( dbg );
+    }
+    if( g_WebcamOverlay )
+    {
+        m_webcamCapture = std::make_unique<WebcamCapture>(
+            m_d3dDevice, m_d3dContext,
+            g_WebcamDeviceSymLink,
+            static_cast<UINT>( outputWidth ),
+            static_cast<UINT>( outputHeight ),
+            static_cast<WebcamCapture::Position>( g_WebcamPosition ),
+            static_cast<WebcamCapture::Size>( g_WebcamSize ) );
+        m_webcamCapture->Start();
+    }
 }
 
 
@@ -1050,6 +1074,13 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
 //----------------------------------------------------------------------------
 void VideoRecordingSession::Close()
 {
+    // Stop webcam capture before closing the main session.
+    if( m_webcamCapture )
+    {
+        m_webcamCapture->Stop();
+        m_webcamCapture.reset();
+    }
+
     auto expected = false;
     if (m_closed.compare_exchange_strong(expected, true))
     {
@@ -1139,8 +1170,24 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 D3D11_TEXTURE2D_DESC desc = {};
                 frameTexture->GetDesc(&desc);
 
+                static int dbgFrameNum = 0;
+                dbgFrameNum++;
+                if( dbgFrameNum <= 10 )
+                {
+                    wchar_t msg[256];
+                    swprintf_s( msg, L"[VideoRec] Frame %d: ts=%lld content=%dx%d tex=%ux%u webcam=%d\n",
+                                 dbgFrameNum,
+                                 timeStamp.count(),
+                                 contentSize.Width, contentSize.Height,
+                                 desc.Width, desc.Height,
+                                 m_webcamCapture ? 1 : 0 );
+                    OutputDebugStringW( msg );
+                }
+
                 winrt::com_ptr<ID3D11Texture2D> backBuffer;
                 winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
+                winrt::com_ptr<ID3D11RenderTargetView> renderTargetView;
+                winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, renderTargetView.put()));
 
                 // Use the smaller of the crop size or content size. The content
                 // size can change while recording, for example by resizing the
@@ -1157,7 +1204,7 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 region.bottom = std::clamp(m_rcCrop.top + height, static_cast<LONG>(0), static_cast<LONG>(desc.Height));
                 region.back = 1;
 
-                m_d3dContext->ClearRenderTargetView(m_renderTargetView.get(), CLEAR_COLOR);
+                m_d3dContext->ClearRenderTargetView(renderTargetView.get(), CLEAR_COLOR);
                 m_d3dContext->CopySubresourceRegion(
                     backBuffer.get(),
                     0,
@@ -1165,6 +1212,13 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                     frameTexture.get(),
                     0,
                     &region);
+
+                // Composite webcam overlay onto the back buffer BEFORE it
+                // gets copied to the encoder's sample texture.
+                if( m_webcamCapture )
+                {
+                    m_webcamCapture->CompositeOnto( backBuffer.get() );
+                }
 
                 desc = {};
                 backBuffer->GetDesc(&desc);
@@ -1176,6 +1230,7 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 winrt::com_ptr<ID3D11Texture2D> sampleTexture;
                 winrt::check_hresult(m_d3dDevice->CreateTexture2D(&desc, nullptr, sampleTexture.put()));
                 m_d3dContext->CopyResource(sampleTexture.get(), backBuffer.get());
+
                 auto dxgiSurface = sampleTexture.as<IDXGISurface>();
                 auto sampleSurface = CreateDirect3DSurface(dxgiSurface.get());
 
@@ -1184,6 +1239,15 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
 
                 auto sample = winrt::MediaStreamSample::CreateFromDirect3D11Surface(sampleSurface, timeStamp);
                 m_hasVideoSample.store(true);
+
+                if( dbgFrameNum <= 10 )
+                {
+                    wchar_t msg[128];
+                    swprintf_s( msg, L"[VideoRec] Sample %d: ts=%lld sampleTex=%ux%u\n",
+                                 dbgFrameNum, timeStamp.count(), desc.Width, desc.Height );
+                    OutputDebugStringW( msg );
+                }
+
                 request.Sample(sample);
             }
             catch (winrt::hresult_error const& error)

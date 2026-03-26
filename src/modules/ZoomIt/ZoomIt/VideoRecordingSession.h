@@ -10,6 +10,7 @@
 
 #include "CaptureFrameWait.h"
 #include "AudioSampleGenerator.h"
+#include "WebcamCapture.h"
 #include <d3d11_4.h>
 #include <ppltasks.h>
 #include <atomic>
@@ -218,9 +219,9 @@ private:
     winrt::MediaTranscoder m_transcoder{ nullptr };
 
     std::unique_ptr<AudioSampleGenerator> m_audioGenerator;
+    std::unique_ptr<WebcamCapture> m_webcamCapture;
 
     winrt::com_ptr<IDXGISwapChain1> m_previewSwapChain;
-    winrt::com_ptr<ID3D11RenderTargetView> m_renderTargetView;
 
     std::atomic<bool> m_isRecording = false;
     std::atomic<bool> m_closed = false;

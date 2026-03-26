@@ -1,0 +1,507 @@
+//==============================================================================
+//
+// WebcamCapture.cpp
+//
+// Captures frames from a webcam using Media Foundation's IMFSourceReader.
+// Frames are delivered as D3D11 textures for GPU-side compositing.
+//
+// Copyright (C) Mark Russinovich
+// Sysinternals - www.sysinternals.com
+//
+//==============================================================================
+#include "pch.h"
+#include "WebcamCapture.h"
+
+#pragma comment(lib, "mf.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
+
+//----------------------------------------------------------------------------
+// WebcamCapture::WebcamCapture
+//----------------------------------------------------------------------------
+WebcamCapture::WebcamCapture(
+    winrt::com_ptr<ID3D11Device> const& device,
+    winrt::com_ptr<ID3D11DeviceContext> const& context,
+    const wchar_t* deviceSymLink,
+    UINT outputWidth,
+    UINT outputHeight,
+    Position position,
+    Size size )
+    : m_d3dDevice( device )
+    , m_d3dContext( context )
+    , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
+    , m_outputWidth( outputWidth )
+    , m_outputHeight( outputHeight )
+    , m_position( position )
+    , m_size( size )
+{
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::~WebcamCapture
+//----------------------------------------------------------------------------
+WebcamCapture::~WebcamCapture()
+{
+    Stop();
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::InitSourceReader
+//
+// Opens the camera via IMFSourceReader.  Negotiates BGRA output so frames
+// can be composited directly.  Uses the D3D11 device manager for
+// GPU-accelerated decoding when the driver supports it.
+//----------------------------------------------------------------------------
+bool WebcamCapture::InitSourceReader()
+{
+    HRESULT hr = MFStartup( MF_VERSION );
+    if( FAILED( hr ) )
+    {
+        OutputDebugStringW( L"[WebcamCapture] MFStartup failed\n" );
+        return false;
+    }
+    m_mfStarted = true;
+
+    // Create a media source for the camera.
+    winrt::com_ptr<IMFAttributes> sourceAttrs;
+    hr = MFCreateAttributes( sourceAttrs.put(), 1 );
+    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] MFCreateAttributes failed\n" ); return false; }
+
+    sourceAttrs->SetGUID( MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                          MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID );
+
+    // Enumerate video capture devices.
+    IMFActivate** ppDevices = nullptr;
+    UINT32 count = 0;
+    hr = MFEnumDeviceSources( sourceAttrs.get(), &ppDevices, &count );
+    if( FAILED( hr ) || count == 0 )
+    {
+        if( ppDevices ) CoTaskMemFree( ppDevices );
+        OutputDebugStringW( L"[WebcamCapture] No cameras found\n" );
+        return false;
+    }
+
+    // Find matching device by symlink, or use the first one.
+    UINT32 deviceIndex = 0;
+    if( !m_deviceSymLink.empty() )
+    {
+        for( UINT32 i = 0; i < count; i++ )
+        {
+            WCHAR* symLink = nullptr;
+            UINT32 symLinkLen = 0;
+            if( SUCCEEDED( ppDevices[i]->GetAllocatedString(
+                    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                    &symLink, &symLinkLen ) ) )
+            {
+                if( _wcsicmp( symLink, m_deviceSymLink.c_str() ) == 0 )
+                    deviceIndex = i;
+                CoTaskMemFree( symLink );
+            }
+        }
+    }
+
+    winrt::com_ptr<IMFMediaSource> mediaSource;
+    hr = ppDevices[deviceIndex]->ActivateObject( IID_PPV_ARGS( mediaSource.put() ) );
+    for( UINT32 i = 0; i < count; i++ )
+        ppDevices[i]->Release();
+    CoTaskMemFree( ppDevices );
+    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] ActivateObject failed\n" ); return false; }
+
+    // Create source reader attributes (request BGRA output).
+    winrt::com_ptr<IMFAttributes> readerAttrs;
+    hr = MFCreateAttributes( readerAttrs.put(), 2 );
+    if( FAILED( hr ) ) return false;
+
+    // Enable hardware transforms so the source reader decodes NV12/MJPEG → BGRA.
+    readerAttrs->SetUINT32( MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE );
+    readerAttrs->SetUINT32( MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE );
+
+    hr = MFCreateSourceReaderFromMediaSource( mediaSource.get(), readerAttrs.get(),
+                                              m_sourceReader.put() );
+    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] MFCreateSourceReaderFromMediaSource failed\n" ); return false; }
+
+    // Set the output media type.  Try RGB32 (BGRX, no alpha) first — this
+    // is the format the MF video processor most reliably converts to from
+    // NV12/YUY2/MJPEG.  ARGB32 (BGRA with alpha) is not supported by many
+    // cameras' video processor chains.
+    const GUID formatsToTry[] = { MFVideoFormat_RGB32, MFVideoFormat_ARGB32 };
+    bool formatSet = false;
+
+    for( const auto& subtype : formatsToTry )
+    {
+        // Try with 640x480 first.
+        winrt::com_ptr<IMFMediaType> outputType;
+        hr = MFCreateMediaType( outputType.put() );
+        if( FAILED( hr ) ) continue;
+        outputType->SetGUID( MF_MT_MAJOR_TYPE, MFMediaType_Video );
+        outputType->SetGUID( MF_MT_SUBTYPE, subtype );
+        MFSetAttributeSize( outputType.get(), MF_MT_FRAME_SIZE, 640, 480 );
+
+        hr = m_sourceReader->SetCurrentMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+            nullptr,
+            outputType.get() );
+        if( SUCCEEDED( hr ) ) { formatSet = true; break; }
+
+        // Try without specifying resolution.
+        outputType = nullptr;
+        hr = MFCreateMediaType( outputType.put() );
+        if( FAILED( hr ) ) continue;
+        outputType->SetGUID( MF_MT_MAJOR_TYPE, MFMediaType_Video );
+        outputType->SetGUID( MF_MT_SUBTYPE, subtype );
+
+        hr = m_sourceReader->SetCurrentMediaType(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+            nullptr,
+            outputType.get() );
+        if( SUCCEEDED( hr ) ) { formatSet = true; break; }
+    }
+
+    if( !formatSet )
+    {
+        OutputDebugStringW( L"[WebcamCapture] SetCurrentMediaType failed for all formats\n" );
+        return false;
+    }
+
+    // Read the actual negotiated frame size.
+    winrt::com_ptr<IMFMediaType> actualType;
+    hr = m_sourceReader->GetCurrentMediaType(
+        static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+        actualType.put() );
+    if( SUCCEEDED( hr ) )
+    {
+        MFGetAttributeSize( actualType.get(), MF_MT_FRAME_SIZE, &m_camWidth, &m_camHeight );
+    }
+
+    if( m_camWidth == 0 || m_camHeight == 0 )
+    {
+        m_camWidth = 640;
+        m_camHeight = 480;
+    }
+
+    {
+        wchar_t msg[128];
+        swprintf_s( msg, L"[WebcamCapture] Camera opened: %ux%u\n", m_camWidth, m_camHeight );
+        OutputDebugStringW( msg );
+    }
+
+    return true;
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::Start
+//----------------------------------------------------------------------------
+bool WebcamCapture::Start()
+{
+    m_running.store( true );
+    m_thread = std::thread( &WebcamCapture::CaptureThread, this );
+    return true;
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::Stop
+//----------------------------------------------------------------------------
+void WebcamCapture::Stop()
+{
+    m_running.store( false );
+    if( m_thread.joinable() )
+        m_thread.join();
+
+    {
+        std::lock_guard<std::mutex> lock( m_frameLock );
+        m_pendingPixels.clear();
+        m_newFrameReady = false;
+    }
+    m_cachedOverlay = nullptr;
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::CaptureThread
+//
+// Reads frames from the source reader.  Each frame is converted to a
+// D3D11 texture and stored as the latest frame for compositing.
+//----------------------------------------------------------------------------
+void WebcamCapture::CaptureThread()
+{
+    // ALL Media Foundation work must happen on the same thread:
+    // COM init, MFStartup, source reader creation, and ReadSample.
+    // IMFSourceReader is not thread-safe across different apartment threads.
+    CoInitializeEx( nullptr, COINIT_MULTITHREADED );
+
+    if( !InitSourceReader() )
+    {
+        OutputDebugStringW( L"[WebcamCapture] InitSourceReader failed on capture thread\n" );
+        CoUninitialize();
+        return;
+    }
+
+    OutputDebugStringW( L"[WebcamCapture] Capture thread started, reading frames...\n" );
+    int frameCount = 0;
+
+    while( m_running.load() )
+    {
+        DWORD streamIndex = 0, flags = 0;
+        LONGLONG timestamp = 0;
+        winrt::com_ptr<IMFSample> sample;
+
+        HRESULT hr = m_sourceReader->ReadSample(
+            static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
+            0,
+            &streamIndex,
+            &flags,
+            &timestamp,
+            sample.put() );
+
+        if( FAILED( hr ) || ( flags & MF_SOURCE_READERF_ENDOFSTREAM ) )
+        {
+            wchar_t msg[128];
+            swprintf_s( msg, L"[WebcamCapture] ReadSample exit: hr=0x%08X flags=0x%X frames=%d\n",
+                         static_cast<unsigned>( hr ), flags, frameCount );
+            OutputDebugStringW( msg );
+            break;
+        }
+
+        if( !sample )
+            continue;
+
+        // Get the buffer and extract raw BGRA pixel data.
+        winrt::com_ptr<IMFMediaBuffer> buffer;
+        hr = sample->ConvertToContiguousBuffer( buffer.put() );
+        if( FAILED( hr ) )
+        {
+            OutputDebugStringW( L"[WebcamCapture] ConvertToContiguousBuffer failed\n" );
+            continue;
+        }
+
+        BYTE* data = nullptr;
+        LONG stride = 0;
+        auto buffer2D = buffer.try_as<IMF2DBuffer>();
+        if( buffer2D )
+        {
+            hr = buffer2D->Lock2D( &data, &stride );
+        }
+        else
+        {
+            DWORD maxLen = 0, curLen = 0;
+            hr = buffer->Lock( &data, &maxLen, &curLen );
+            stride = static_cast<LONG>( m_camWidth * 4 );
+        }
+        if( FAILED( hr ) || !data )
+            continue;
+
+        // Pre-scale the camera frame to overlay dimensions on this thread
+        // so CompositeOnto can do a fast GPU-only blit without staging.
+        const UINT rowBytes = m_camWidth * 4;
+        const UINT absStride = ( stride > 0 ) ? static_cast<UINT>( stride ) : rowBytes;
+
+        // Compute overlay dimensions if not yet done.
+        if( m_overlayW == 0 )
+            ComputeOverlayDimensions();
+
+        const UINT ovW = m_overlayW;
+        const UINT ovH = m_overlayH;
+        if( ovW > 0 && ovH > 0 )
+        {
+            // Pre-scale camera frame to overlay dimensions (CPU only).
+            // NO D3D calls here — the capture thread must not touch the
+            // recording session's D3D device to avoid GPU contention.
+            const UINT scaledStride = ovW * 4;
+            std::vector<BYTE> scaled( static_cast<size_t>( scaledStride ) * ovH );
+
+            for( UINT y = 0; y < ovH; y++ )
+            {
+                const UINT srcY = y * m_camHeight / ovH;
+                const BYTE* srcRow = data + srcY * absStride;
+                BYTE* dstRow = scaled.data() + y * scaledStride;
+
+                for( UINT x = 0; x < ovW; x++ )
+                {
+                    const UINT srcX = x * m_camWidth / ovW;
+                    const BYTE* sp = srcRow + srcX * 4;
+                    BYTE* dp = dstRow + x * 4;
+                    dp[0] = sp[0];
+                    dp[1] = sp[1];
+                    dp[2] = sp[2];
+                    dp[3] = 0xFF;
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock( m_frameLock );
+                m_pendingPixels = std::move( scaled );
+                m_newFrameReady = true;
+                frameCount++;
+                if( frameCount <= 3 )
+                {
+                    wchar_t msg[128];
+                    swprintf_s( msg, L"[WebcamCapture] Got frame %d: cam=%ux%u overlay=%ux%u\n",
+                                 frameCount, m_camWidth, m_camHeight, ovW, ovH );
+                    OutputDebugStringW( msg );
+                }
+            }
+        }
+
+        if( buffer2D )
+            buffer2D->Unlock2D();
+        else
+            buffer->Unlock();
+    }
+
+    // Release MF objects on the thread that created them.
+    m_sourceReader = nullptr;
+    if( m_mfStarted )
+    {
+        MFShutdown();
+        m_mfStarted = false;
+    }
+
+    CoUninitialize();
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::ComputeDestRect
+//
+// Computes the destination rectangle for the webcam overlay on the
+// recording output surface.
+//----------------------------------------------------------------------------
+RECT WebcamCapture::ComputeDestRect() const
+{
+    // Size percentages: Small=15%, Medium=25%, Large=33%.
+    static const int sizePercent[] = { 15, 25, 33 };
+    const int pct = sizePercent[min( static_cast<int>( m_size ), 2 )];
+    const int margin = 8;
+
+    // Compute overlay dimensions maintaining camera aspect ratio.
+    int overlayW = static_cast<int>( m_outputWidth ) * pct / 100;
+    int overlayH = ( m_camHeight > 0 && m_camWidth > 0 )
+        ? overlayW * static_cast<int>( m_camHeight ) / static_cast<int>( m_camWidth )
+        : overlayW * 3 / 4;
+
+    // Clamp to output size.
+    if( overlayW > static_cast<int>( m_outputWidth ) - margin * 2 )
+        overlayW = static_cast<int>( m_outputWidth ) - margin * 2;
+    if( overlayH > static_cast<int>( m_outputHeight ) - margin * 2 )
+        overlayH = static_cast<int>( m_outputHeight ) - margin * 2;
+
+    RECT dst = {};
+    switch( m_position )
+    {
+    case TopLeft:
+        dst.left = margin;
+        dst.top = margin;
+        break;
+    case TopRight:
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
+        dst.top = margin;
+        break;
+    case BottomLeft:
+        dst.left = margin;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
+        break;
+    case BottomRight:
+    default:
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
+        break;
+    }
+    dst.right = dst.left + overlayW;
+    dst.bottom = dst.top + overlayH;
+    return dst;
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::ComputeOverlayDimensions
+//
+// Pre-computes the overlay width/height and destination rect once the
+// camera resolution is known.
+//----------------------------------------------------------------------------
+void WebcamCapture::ComputeOverlayDimensions()
+{
+    m_destRect = ComputeDestRect();
+    m_overlayW = static_cast<UINT>( max( 1L, m_destRect.right - m_destRect.left ) );
+    m_overlayH = static_cast<UINT>( max( 1L, m_destRect.bottom - m_destRect.top ) );
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::CompositeOnto
+//
+// Composites the pre-scaled webcam overlay onto the target texture using
+// a GPU-only path: create a texture from CPU pixels via D3D11_SUBRESOURCE_DATA
+// then CopySubresourceRegion to paste it at the right position.
+// No staging textures, no Map/Unmap, no GPU↔CPU sync.
+//----------------------------------------------------------------------------
+bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
+{
+    // If the capture thread has new pixels, upload them to the cached
+    // GPU texture.  Use try_lock so we NEVER block the encoder callback.
+    // If the lock is contended, just reuse the previous cached texture.
+    if( m_frameLock.try_lock() )
+    {
+        if( m_newFrameReady && !m_pendingPixels.empty() && m_overlayW > 0 && m_overlayH > 0 )
+        {
+            bool recreateTexture = true;
+            if( m_cachedOverlay )
+            {
+                D3D11_TEXTURE2D_DESC existingDesc = {};
+                m_cachedOverlay->GetDesc( &existingDesc );
+                recreateTexture = existingDesc.Width != m_overlayW ||
+                                  existingDesc.Height != m_overlayH ||
+                                  existingDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM;
+            }
+
+            if( recreateTexture )
+            {
+                D3D11_TEXTURE2D_DESC texDesc = {};
+                texDesc.Width = m_overlayW;
+                texDesc.Height = m_overlayH;
+                texDesc.MipLevels = 1;
+                texDesc.ArraySize = 1;
+                texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                texDesc.SampleDesc.Count = 1;
+                texDesc.Usage = D3D11_USAGE_DEFAULT;
+                texDesc.BindFlags = 0;
+
+                winrt::com_ptr<ID3D11Texture2D> newTex;
+                if( SUCCEEDED( m_d3dDevice->CreateTexture2D( &texDesc, nullptr, newTex.put() ) ) )
+                {
+                    m_cachedOverlay = newTex;
+                }
+            }
+
+            if( m_cachedOverlay )
+            {
+                m_d3dContext->UpdateSubresource(
+                    m_cachedOverlay.get(),
+                    0,
+                    nullptr,
+                    m_pendingPixels.data(),
+                    m_overlayW * 4,
+                    0 );
+            }
+            m_newFrameReady = false;
+        }
+        m_frameLock.unlock();
+    }
+
+    if( !m_cachedOverlay )
+        return false;
+
+    // Fast GPU-only blit.
+    D3D11_TEXTURE2D_DESC targetDesc = {};
+    target->GetDesc( &targetDesc );
+
+    UINT destX = static_cast<UINT>( max( 0L, m_destRect.left ) );
+    UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
+
+    D3D11_BOX srcBox = {};
+    srcBox.right = min( m_overlayW, targetDesc.Width - destX );
+    srcBox.bottom = min( m_overlayH, targetDesc.Height - destY );
+    srcBox.back = 1;
+
+    m_d3dContext->CopySubresourceRegion(
+        target, 0, destX, destY, 0,
+        m_cachedOverlay.get(), 0, &srcBox );
+
+    return true;
+}
