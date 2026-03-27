@@ -256,34 +256,34 @@ BEGIN
     LTEXT           "Note that in LiveZoom you must use Ctrl+Up and Ctrl+Down to control the zoom level. To enter drawing mode, use the standard zoom-without-draw hotkey and then escape to go back to LiveZoom.",IDC_STATIC,7,30,255,27
 END
 
-RECORD DIALOGEX 0, 0, 263, 224
+RECORD DIALOGEX 0, 0, 263, 228
 STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_SYSMENU
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
-    CONTROL         "",IDC_RECORD_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,61,96,80,12
-    LTEXT           "Record Toggle:",IDC_STATIC,7,98,54,8
+    CONTROL         "",IDC_RECORD_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,61,83,80,12
+    LTEXT           "Record Toggle:",IDC_STATIC,7,85,54,8
     LTEXT           "Record video of the unzoomed live screen or a static zoomed session by entering the recording hot key and finish the recording by entering it again. ",IDC_STATIC,7,7,248,28
-    LTEXT           "Note: Recording is only available on Windows 10 (version 1903) and higher.",IDC_STATIC,7,77,249,19
-    LTEXT           "Scaling:",IDC_STATIC,30,115,26,8
-    COMBOBOX        IDC_RECORD_SCALING,61,114,26,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Format:",IDC_STATIC,30,132,26,8
-    COMBOBOX        IDC_RECORD_FORMAT,61,131,60,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Frame Rate:",IDC_STATIC,119,115,44,8,NOT WS_VISIBLE
-    COMBOBOX        IDC_RECORD_FRAME_RATE,166,114,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,35,245,19
-    LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,55,251,19
-    CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,149,83,10
-    CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,161,83,10
-    COMBOBOX        IDC_MICROPHONE,81,176,152,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,32,178,47,8
-    CONTROL         "Show &webcam overlay",IDC_WEBCAM_OVERLAY,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,190,83,10
-    LTEXT           "Camera:",IDC_WEBCAM_DEVICE_LABEL,95,192,28,8
-    COMBOBOX        IDC_WEBCAM_DEVICE,125,190,131,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Position:",IDC_WEBCAM_POSITION_LABEL,32,204,32,8
-    COMBOBOX        IDC_WEBCAM_POSITION,62,202,60,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Size:",IDC_WEBCAM_SIZE_LABEL,136,204,20,8
-    COMBOBOX        IDC_WEBCAM_SIZE,158,202,60,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "&Trim",IDC_TRIM_FILE,207,209,53,14
+    LTEXT           "Note: Recording is only available on Windows 10 (version 1903) and higher.",IDC_STATIC,7,70,249,12
+    LTEXT           "Scaling:",IDC_STATIC,30,102,26,8
+    COMBOBOX        IDC_RECORD_SCALING,61,101,26,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Format:",IDC_STATIC,30,120,26,8
+    COMBOBOX        IDC_RECORD_FORMAT,61,118,60,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Frame Rate:",IDC_STATIC,119,102,44,8,NOT WS_VISIBLE
+    COMBOBOX        IDC_RECORD_FRAME_RATE,166,101,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,28,245,19
+    LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,48,251,19
+    CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,8,136,83,10
+    CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,125,135,83,10
+    COMBOBOX        IDC_MICROPHONE,81,149,128,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,34,151,47,8
+    CONTROL         "Show &webcam overlay",IDC_WEBCAM_OVERLAY,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,165,86,10
+    LTEXT           "Camera:",IDC_WEBCAM_DEVICE_LABEL,46,179,28,8
+    COMBOBOX        IDC_WEBCAM_DEVICE,82,177,127,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Position:",IDC_WEBCAM_POSITION_LABEL,33,197,32,8
+    COMBOBOX        IDC_WEBCAM_POSITION,64,195,55,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Size:",IDC_WEBCAM_SIZE_LABEL,137,197,20,8
+    COMBOBOX        IDC_WEBCAM_SIZE,159,195,50,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "&Trim",IDC_TRIM_FILE,207,213,53,14
 END
 
 SNIP DIALOGEX 0, 0, 260, 80
@@ -420,7 +420,7 @@ BEGIN
         LEFTMARGIN, 7
         RIGHTMARGIN, 260
         TOPMARGIN, 7
-        BOTTOMMARGIN, 223
+        BOTTOMMARGIN, 227
     END
 
     "SNIP", DIALOG

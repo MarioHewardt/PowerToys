@@ -502,15 +502,33 @@ namespace
         }
 
         UINT creationFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-#if defined(_DEBUG)
-        creationFlags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
 
         D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0 };
         D3D_FEATURE_LEVEL levelCreated = D3D_FEATURE_LEVEL_11_0;
 
         winrt::com_ptr<ID3D11Device> device;
         winrt::com_ptr<ID3D11DeviceContext> context;
+
+#if defined(_DEBUG)
+        // Try with debug layer first, fall back without if SDK layers aren't installed.
+        if (SUCCEEDED(D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            creationFlags | D3D11_CREATE_DEVICE_DEBUG,
+            levels,
+            ARRAYSIZE(levels),
+            D3D11_SDK_VERSION,
+            device.put(),
+            &levelCreated,
+            context.put())))
+        {
+            pData->previewD3DDevice = device;
+            pData->previewD3DContext = context;
+            return true;
+        }
+#endif
+
         if (SUCCEEDED(D3D11CreateDevice(
             nullptr,
             D3D_DRIVER_TYPE_HARDWARE,
@@ -2829,6 +2847,11 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
 
         pData->frameAvailableToken = pData->mediaPlayer.VideoFrameAvailable([hDlg, dataPtr](auto const& sender, auto const&)
         {
+            static int s_frameAvailCount = 0;
+            static int s_frameDropped = 0;
+            static int s_frameCopied = 0;
+            s_frameAvailCount++;
+
             if (!dataPtr)
             {
                 return;
@@ -2836,6 +2859,14 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
 
             if (dataPtr->frameCopyInProgress.exchange(true, std::memory_order_relaxed))
             {
+                s_frameDropped++;
+                if (s_frameDropped <= 5 || (s_frameDropped % 100) == 0)
+                {
+                    wchar_t msg[256];
+                    swprintf_s(msg, L"[TrimPlayback] VideoFrameAvailable DROPPED (busy) total=%d avail=%d copied=%d\n",
+                        s_frameDropped, s_frameAvailCount, s_frameCopied);
+                    OutputDebugStringW(msg);
+                }
                 return;
             }
 
@@ -2843,6 +2874,7 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
             {
                 if (!EnsurePlaybackDevice(dataPtr))
                 {
+                    OutputDebugStringW(L"[TrimPlayback] EnsurePlaybackDevice FAILED\n");
                     dataPtr->frameCopyInProgress.store(false, std::memory_order_relaxed);
                     return;
                 }
@@ -2858,6 +2890,7 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
 
                 if (!EnsureFrameTextures(dataPtr, width, height))
                 {
+                    OutputDebugStringW(L"[TrimPlayback] EnsureFrameTextures FAILED\n");
                     dataPtr->frameCopyInProgress.store(false, std::memory_order_relaxed);
                     return;
                 }
@@ -2875,6 +2908,13 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
                     {
                         auto surface = inspectableSurface.as<winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DSurface>();
                         sender.CopyFrameToVideoSurface(surface);
+
+                        if (s_frameAvailCount <= 5)
+                        {
+                            wchar_t msg[128];
+                            swprintf_s(msg, L"[TrimPlayback] CopyFrameToVideoSurface ok, frame %d size=%ux%u\n", s_frameAvailCount, width, height);
+                            OutputDebugStringW(msg);
+                        }
 
                         if (dataPtr->previewD3DContext && dataPtr->previewFrameStaging)
                         {
@@ -2919,10 +2959,18 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
                                         dataPtr->previewBitmapOwned = true;
                                     }
 
+                                    s_frameCopied++;
+                                    if (s_frameCopied <= 5 || (s_frameCopied % 100) == 0)
+                                    {
+                                        wchar_t msg[128];
+                                        swprintf_s(msg, L"[TrimPlayback] Bitmap created, posting PREVIEW_READY (copied=%d)\n", s_frameCopied);
+                                        OutputDebugStringW(msg);
+                                    }
                                     PostMessage(hDlg, WMU_PREVIEW_READY, 0, 0);
                                 }
                                 else if (hBitmap)
                                 {
+                                    OutputDebugStringW(L"[TrimPlayback] CreateDIBSection bits=null\n");
                                     DeleteObject(hBitmap);
                                 }
 
@@ -2934,6 +2982,7 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
             }
             catch (...)
             {
+                OutputDebugStringW(L"[TrimPlayback] VideoFrameAvailable EXCEPTION\n");
             }
 
             dataPtr->frameCopyInProgress.store(false, std::memory_order_relaxed);
@@ -2942,6 +2991,9 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
         auto session = pData->mediaPlayer.PlaybackSession();
         pData->positionChangedToken = session.PositionChanged([hDlg, dataPtr](auto const& sender, auto const&)
         {
+            static int s_posChangedCount = 0;
+            s_posChangedCount++;
+
             if (!dataPtr)
             {
                 return;
@@ -2952,10 +3004,22 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
                 // When not playing, ignore media callbacks so UI-driven seeks remain authoritative.
                 if (!dataPtr->isPlaying.load(std::memory_order_relaxed))
                 {
+                    if (s_posChangedCount <= 10)
+                    {
+                        OutputDebugStringW(L"[TrimPlayback] PositionChanged: NOT playing, skipping\n");
+                    }
                     return;
                 }
 
                 auto pos = sender.Position();
+
+                if (s_posChangedCount <= 10 || (s_posChangedCount % 100) == 0)
+                {
+                    wchar_t msg[256];
+                    swprintf_s(msg, L"[TrimPlayback] PositionChanged #%d: pos=%lld trimEnd=%lld\n",
+                        s_posChangedCount, pos.count(), dataPtr->trimEnd.count());
+                    OutputDebugStringW(msg);
+                }
 
                 // Suppress the transient 0-position report before the initial seek takes effect.
                 if (dataPtr->pendingInitialSeek.load(std::memory_order_relaxed) &&
