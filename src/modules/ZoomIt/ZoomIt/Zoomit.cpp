@@ -4953,8 +4953,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
 
         // Webcam size combo
         {
-            const wchar_t* sizes[] = { L"Small", L"Medium", L"Large" };
-            for( int i = 0; i < 3; i++ )
+            const wchar_t* sizes[] = { L"Small", L"Medium", L"Large", L"X-Large" };
+            for( int i = 0; i < 4; i++ )
                 SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE ), static_cast<UINT>(CB_ADDSTRING), static_cast<WPARAM>(0), reinterpret_cast<LPARAM>(sizes[i]) );
             SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamSize), static_cast<LPARAM>(0) );
         }

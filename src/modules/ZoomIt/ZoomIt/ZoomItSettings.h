@@ -58,7 +58,7 @@ BOOLEAN g_CaptureAudio = FALSE;
 TCHAR	g_MicrophoneDeviceId[MAX_PATH] = {0};
 BOOLEAN g_WebcamOverlay = FALSE;
 DWORD   g_WebcamPosition = 3; // 0=TL, 1=TR, 2=BL, 3=BR
-DWORD   g_WebcamSize = 1;     // 0=Small(15%), 1=Medium(25%), 2=Large(33%)
+DWORD   g_WebcamSize = 1;     // 0=Small(15%), 1=Medium(25%), 2=Large(33%), 3=XLarge(50%)
 TCHAR   g_WebcamDeviceSymLink[MAX_PATH] = {0};
 TCHAR	g_RecordingSaveLocationBuffer[MAX_PATH] = {0};
 TCHAR	g_ScreenshotSaveLocationBuffer[MAX_PATH] = {0};

@@ -472,9 +472,9 @@ void WebcamCapture::CaptureThread()
 //----------------------------------------------------------------------------
 RECT WebcamCapture::ComputeDestRect() const
 {
-    // Size percentages: Small=15%, Medium=25%, Large=33%.
-    static const int sizePercent[] = { 15, 25, 33 };
-    const int pct = sizePercent[min( static_cast<int>( m_size ), 2 )];
+    // Size percentages: Small=15%, Medium=25%, Large=33%, XLarge=50%.
+    static const int sizePercent[] = { 15, 25, 33, 50 };
+    const int pct = sizePercent[min( static_cast<int>( m_size ), 3 )];
     const int margin = 8;
 
     // Compute overlay dimensions maintaining camera aspect ratio.

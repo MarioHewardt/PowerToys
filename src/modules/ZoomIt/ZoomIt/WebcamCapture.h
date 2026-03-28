@@ -30,7 +30,7 @@ public:
     enum Position { TopLeft = 0, TopRight = 1, BottomLeft = 2, BottomRight = 3 };
 
     // Size constants matching g_WebcamSize values.
-    enum Size { Small = 0, Medium = 1, Large = 2 };
+    enum Size { Small = 0, Medium = 1, Large = 2, XLarge = 3 };
 
     WebcamCapture(
         winrt::com_ptr<ID3D11Device> const& device,
