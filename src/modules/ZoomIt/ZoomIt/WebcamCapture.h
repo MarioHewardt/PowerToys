@@ -46,6 +46,10 @@ public:
     bool Start();
     void Stop();
 
+    // Block until the first webcam frame has been captured, or timeoutMs
+    // elapses.  Returns true if a frame is ready.
+    bool WaitForFirstFrame( int timeoutMs );
+
     // Composite the latest camera frame onto the given texture.
     // Must be called from the thread that owns m_d3dContext.
     // Returns true if a frame was composited.
@@ -69,7 +73,14 @@ private:
     bool                                m_newFrameReady = false;
 
     // Cached GPU texture (owned by CompositeOnto's thread only).
-    winrt::com_ptr<ID3D11Texture2D>     m_cachedOverlay;
+    winrt::com_ptr<ID3D11Texture2D>     m_overlayTex;
+    bool                                m_hasOverlay = false;
+    UINT                                m_texW = 0;
+    UINT                                m_texH = 0;
+
+    // Reusable frame buffer for the capture thread (avoids per-frame alloc).
+    std::vector<BYTE>                   m_framePixels;
+    std::vector<BYTE>                   m_scaledPixels;
 
     UINT                                m_overlayW = 0;
     UINT                                m_overlayH = 0;
@@ -93,4 +104,9 @@ private:
     std::mutex                          m_readyMutex;
     std::condition_variable             m_readyCV;
     bool                                m_firstFrameCaptured = false;
+
+    // Debug counters for CompositeOnto logging.
+    int                                 m_compositeCount = 0;
+    int                                 m_lockFailCount = 0;
+    int                                 m_uploadCount = 0;
 };

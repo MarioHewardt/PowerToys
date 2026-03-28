@@ -950,6 +950,28 @@ VideoRecordingSession::VideoRecordingSession(
     outputWidth = EnsureEven(outputWidth);
     outputHeight = EnsureEven(outputHeight);
 
+    // Start webcam capture early so the camera sensor warms up while the
+    // encoding profile, swap chain, audio graph, and MF transcoder
+    // initialize.  The first ReadSample takes ~850 ms for sensor warmup;
+    // starting it here overlaps that cost with the setup below.
+    {
+        wchar_t dbg[256];
+        swprintf_s( dbg, L"[WebcamCapture] g_WebcamOverlay=%d outputW=%d outputH=%d\n",
+                     static_cast<int>( g_WebcamOverlay ), outputWidth, outputHeight );
+        OutputDebugStringW( dbg );
+    }
+    if( g_WebcamOverlay )
+    {
+        m_webcamCapture = std::make_unique<WebcamCapture>(
+            m_d3dDevice, m_d3dContext,
+            g_WebcamDeviceSymLink,
+            static_cast<UINT>( outputWidth ),
+            static_cast<UINT>( outputHeight ),
+            static_cast<WebcamCapture::Position>( g_WebcamPosition ),
+            static_cast<WebcamCapture::Size>( g_WebcamSize ) );
+        m_webcamCapture->Start();
+    }
+
     // Describe out output: H264 video with an MP4 container
     m_encodingProfile = winrt::MediaEncodingProfile();
     m_encodingProfile.Container().Subtype(L"MPEG4");
@@ -988,23 +1010,16 @@ VideoRecordingSession::VideoRecordingSession(
     // Always create audio generator for loopback capture; captureAudio controls microphone
     m_audioGenerator = std::make_unique<AudioSampleGenerator>(captureAudio, captureSystemAudio);
 
-    // Create webcam capture if enabled.
+    // Wait for the webcam's first frame now that all other setup is done.
+    // The camera was started early, so most of its ~850 ms sensor warmup has
+    // overlapped with the encoding profile, swap chain, and audio generator
+    // setup above.  Blocking here (on the calling thread, not the MF thread
+    // pool) ensures the webcam overlay is present from the very first frame.
+    if( m_webcamCapture )
     {
-        wchar_t dbg[256];
-        swprintf_s( dbg, L"[WebcamCapture] g_WebcamOverlay=%d outputW=%d outputH=%d\n",
-                     static_cast<int>( g_WebcamOverlay ), outputWidth, outputHeight );
-        OutputDebugStringW( dbg );
-    }
-    if( g_WebcamOverlay )
-    {
-        m_webcamCapture = std::make_unique<WebcamCapture>(
-            m_d3dDevice, m_d3dContext,
-            g_WebcamDeviceSymLink,
-            static_cast<UINT>( outputWidth ),
-            static_cast<UINT>( outputHeight ),
-            static_cast<WebcamCapture::Position>( g_WebcamPosition ),
-            static_cast<WebcamCapture::Size>( g_WebcamSize ) );
-        m_webcamCapture->Start();
+        OutputDebugStringW( L"[Recording] Constructor: waiting for webcam first frame...\n" );
+        m_webcamCapture->WaitForFirstFrame( 2000 );
+        OutputDebugStringW( L"[Recording] Constructor: webcam ready\n" );
     }
 }
 
@@ -1030,11 +1045,14 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
     auto expected = false;
     if (m_isRecording.compare_exchange_strong(expected, true))
     {
+        OutputDebugStringW( L"[Recording] StartAsync: begin\n" );
 
         // Create our MediaStreamSource
         if(m_audioGenerator) {
 
+            OutputDebugStringW( L"[Recording] StartAsync: initializing audio...\n" );
             co_await m_audioGenerator->InitializeAsync();
+            OutputDebugStringW( L"[Recording] StartAsync: audio initialized\n" );
             m_streamSource = winrt::MediaStreamSource(m_videoDescriptor, winrt::AudioStreamDescriptor(m_audioGenerator->GetEncodingProperties()));
         }
         else {
@@ -1062,7 +1080,9 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
         winrt::PrepareTranscodeResult transcode{ nullptr };
         try
         {
+            OutputDebugStringW( L"[Recording] StartAsync: preparing transcode...\n" );
             transcode = co_await m_transcoder.PrepareMediaStreamSourceTranscodeAsync(m_streamSource, m_stream, m_encodingProfile);
+            OutputDebugStringW( L"[Recording] StartAsync: transcode prepared, starting...\n" );
 
             if (m_closed.load())
             {
@@ -1070,6 +1090,7 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
             }
 
             co_await transcode.TranscodeAsync();
+            OutputDebugStringW( L"[Recording] StartAsync: transcode completed\n" );
         }
         catch (winrt::hresult_error const& error)
         {
@@ -1189,7 +1210,22 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 frameTexture->GetDesc(&desc);
 
                 static int dbgFrameNum = 0;
+                static LARGE_INTEGER dbgFreq = {}, dbgLastFrame = {};
+                // Reset counters on first frame of a new recording session.
+                if( !m_hasVideoSample.load() )
+                {
+                    dbgFrameNum = 0;
+                    dbgFreq.QuadPart = 0;
+                }
                 dbgFrameNum++;
+                if( dbgFreq.QuadPart == 0 )
+                {
+                    QueryPerformanceFrequency( &dbgFreq );
+                    QueryPerformanceCounter( &dbgLastFrame );
+                }
+                LARGE_INTEGER tStart, tAfterCrop, tAfterWebcam, tAfterCreate, tAfterPresent;
+                QueryPerformanceCounter( &tStart );
+
                 if( dbgFrameNum <= 10 )
                 {
                     wchar_t msg[256];
@@ -1204,8 +1240,13 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
 
                 winrt::com_ptr<ID3D11Texture2D> backBuffer;
                 winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
-                winrt::com_ptr<ID3D11RenderTargetView> renderTargetView;
-                winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, renderTargetView.put()));
+
+                // Reuse the render target view — the swap chain back buffer
+                // pointer is stable between Present calls.
+                if( !m_cachedRTV )
+                {
+                    winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, m_cachedRTV.put()));
+                }
 
                 // Use the smaller of the crop size or content size. The content
                 // size can change while recording, for example by resizing the
@@ -1222,7 +1263,7 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 region.bottom = std::clamp(m_rcCrop.top + height, static_cast<LONG>(0), static_cast<LONG>(desc.Height));
                 region.back = 1;
 
-                m_d3dContext->ClearRenderTargetView(renderTargetView.get(), CLEAR_COLOR);
+                m_d3dContext->ClearRenderTargetView(m_cachedRTV.get(), CLEAR_COLOR);
                 m_d3dContext->CopySubresourceRegion(
                     backBuffer.get(),
                     0,
@@ -1231,12 +1272,16 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                     0,
                     &region);
 
+                QueryPerformanceCounter( &tAfterCrop );
+
                 // Composite webcam overlay onto the back buffer BEFORE it
                 // gets copied to the encoder's sample texture.
                 if( m_webcamCapture )
                 {
                     m_webcamCapture->CompositeOnto( backBuffer.get() );
                 }
+
+                QueryPerformanceCounter( &tAfterWebcam );
 
                 desc = {};
                 backBuffer->GetDesc(&desc);
@@ -1249,6 +1294,8 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 winrt::check_hresult(m_d3dDevice->CreateTexture2D(&desc, nullptr, sampleTexture.put()));
                 m_d3dContext->CopyResource(sampleTexture.get(), backBuffer.get());
 
+                QueryPerformanceCounter( &tAfterCreate );
+
                 auto dxgiSurface = sampleTexture.as<IDXGISurface>();
                 auto sampleSurface = CreateDirect3DSurface(dxgiSurface.get());
 
@@ -1258,11 +1305,22 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 auto sample = winrt::MediaStreamSample::CreateFromDirect3D11Surface(sampleSurface, timeStamp);
                 m_hasVideoSample.store(true);
 
-                if( dbgFrameNum <= 10 )
+                QueryPerformanceCounter( &tAfterPresent );
+                double intervalMs = static_cast<double>( tStart.QuadPart - dbgLastFrame.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                double cropMs = static_cast<double>( tAfterCrop.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                double webcamMs = static_cast<double>( tAfterWebcam.QuadPart - tAfterCrop.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                double createMs = static_cast<double>( tAfterCreate.QuadPart - tAfterWebcam.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                double presentMs = static_cast<double>( tAfterPresent.QuadPart - tAfterCreate.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                double totalMs = static_cast<double>( tAfterPresent.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+                dbgLastFrame = tStart;
+
+                if( dbgFrameNum <= 10 || ( dbgFrameNum % 30 ) == 0 )
                 {
-                    wchar_t msg[128];
-                    swprintf_s( msg, L"[VideoRec] Sample %d: ts=%lld sampleTex=%ux%u\n",
-                                 dbgFrameNum, timeStamp.count(), desc.Width, desc.Height );
+                    wchar_t msg[512];
+                    swprintf_s( msg, L"[VideoRec] frame %d: interval=%.1fms crop=%.1fms webcam=%.1fms "
+                                L"create+copy=%.1fms present=%.1fms total=%.1fms tex=%ux%u\n",
+                                 dbgFrameNum, intervalMs, cropMs, webcamMs, createMs, presentMs, totalMs,
+                                 desc.Width, desc.Height );
                     OutputDebugStringW( msg );
                 }
 

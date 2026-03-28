@@ -223,6 +223,9 @@ private:
 
     winrt::com_ptr<IDXGISwapChain1> m_previewSwapChain;
 
+    // Cached render target view to avoid per-frame allocation.
+    winrt::com_ptr<ID3D11RenderTargetView> m_cachedRTV;
+
     std::atomic<bool> m_isRecording = false;
     std::atomic<bool> m_closed = false;
 

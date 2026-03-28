@@ -210,15 +210,22 @@ bool WebcamCapture::Start()
     m_running.store( true );
     m_thread = std::thread( &WebcamCapture::CaptureThread, this );
 
-    // Wait for the first frame so the webcam overlay is ready before
-    // recording begins.  Timeout after 5 s to avoid blocking forever
-    // if the camera fails to produce a frame.
-    {
-        std::unique_lock<std::mutex> lock( m_readyMutex );
-        m_readyCV.wait_for( lock, std::chrono::seconds( 5 ),
-                            [this]{ return m_firstFrameCaptured; } );
-    }
+    // Don't block — let the capture thread warm up the camera asynchronously.
+    // CompositeOnto will return false until the first frame arrives, so the
+    // first few video frames won't have the webcam overlay, but recording
+    // starts immediately instead of stalling ~1 s for camera warmup.
     return true;
+}
+
+//----------------------------------------------------------------------------
+// WebcamCapture::WaitForFirstFrame
+//----------------------------------------------------------------------------
+bool WebcamCapture::WaitForFirstFrame( int timeoutMs )
+{
+    std::unique_lock<std::mutex> lock( m_readyMutex );
+    m_readyCV.wait_for( lock, std::chrono::milliseconds( timeoutMs ),
+                        [this]{ return m_firstFrameCaptured; } );
+    return m_firstFrameCaptured;
 }
 
 //----------------------------------------------------------------------------
@@ -235,7 +242,10 @@ void WebcamCapture::Stop()
         m_pendingPixels.clear();
         m_newFrameReady = false;
     }
-    m_cachedOverlay = nullptr;
+    m_overlayTex = nullptr;
+    m_hasOverlay = false;
+    m_texW = 0;
+    m_texH = 0;
 }
 
 //----------------------------------------------------------------------------
@@ -260,12 +270,18 @@ void WebcamCapture::CaptureThread()
 
     OutputDebugStringW( L"[WebcamCapture] Capture thread started, reading frames...\n" );
     int frameCount = 0;
+    LARGE_INTEGER perfFreq = {}, lastFrameTime = {}, loopStart = {};
+    QueryPerformanceFrequency( &perfFreq );
+    QueryPerformanceCounter( &lastFrameTime );
+    double totalReadMs = 0, totalCopyMs = 0, totalScaleMs = 0, totalLockMs = 0;
 
     while( m_running.load() )
     {
         DWORD streamIndex = 0, flags = 0;
         LONGLONG timestamp = 0;
         winrt::com_ptr<IMFSample> sample;
+
+        QueryPerformanceCounter( &loopStart );
 
         HRESULT hr = m_sourceReader->ReadSample(
             static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
@@ -286,6 +302,11 @@ void WebcamCapture::CaptureThread()
 
         if( !sample )
             continue;
+
+        LARGE_INTEGER afterRead;
+        QueryPerformanceCounter( &afterRead );
+        double readMs = static_cast<double>( afterRead.QuadPart - loopStart.QuadPart ) * 1000.0 / perfFreq.QuadPart;
+        totalReadMs += readMs;
 
         // Get the buffer and flatten it into a known-tight BGRA buffer.
         // Use IMF2DBuffer + MFCopyImage when available so the true source
@@ -314,7 +335,7 @@ void WebcamCapture::CaptureThread()
 
         const UINT rowBytes = m_camWidth * 4;
         const DWORD frameBytes = static_cast<DWORD>( rowBytes * m_camHeight );
-        std::vector<BYTE> framePixels( frameBytes );
+        m_framePixels.resize( frameBytes );
 
         bool copiedFrame = false;
         if( auto buffer2D = buffer.try_as<IMF2DBuffer>() )
@@ -324,7 +345,7 @@ void WebcamCapture::CaptureThread()
             hr = buffer2D->Lock2D( &srcData, &srcStride );
             if( SUCCEEDED( hr ) && srcData != nullptr )
             {
-                hr = MFCopyImage( framePixels.data(), rowBytes,
+                hr = MFCopyImage( m_framePixels.data(), rowBytes,
                                   srcData, srcStride,
                                   rowBytes, m_camHeight );
                 buffer2D->Unlock2D();
@@ -370,15 +391,14 @@ void WebcamCapture::CaptureThread()
                     }
                 }
 
-                // Re-derive sizes with updated dimensions.
                 const UINT newRowBytes = m_camWidth * 4;
                 const DWORD newFrameBytes = static_cast<DWORD>( newRowBytes * m_camHeight );
-                framePixels.resize( newFrameBytes );
-                memcpy_s( framePixels.data(), newFrameBytes, data, min( curLen, newFrameBytes ) );
+                m_framePixels.resize( newFrameBytes );
+                memcpy_s( m_framePixels.data(), newFrameBytes, data, min( curLen, newFrameBytes ) );
             }
             else
             {
-                memcpy_s( framePixels.data(), frameBytes, data, min( curLen, frameBytes ) );
+                memcpy_s( m_framePixels.data(), frameBytes, data, min( curLen, frameBytes ) );
             }
             buffer->Unlock();
             copiedFrame = true;
@@ -387,13 +407,14 @@ void WebcamCapture::CaptureThread()
         if( !copiedFrame )
             continue;
 
+        LARGE_INTEGER afterCopy;
+        QueryPerformanceCounter( &afterCopy );
+        double copyMs = static_cast<double>( afterCopy.QuadPart - afterRead.QuadPart ) * 1000.0 / perfFreq.QuadPart;
+        totalCopyMs += copyMs;
+
         // Use the current m_camWidth (which may have been corrected by
         // the buffer-mismatch safety net above).
         const UINT actualRowBytes = m_camWidth * 4;
-
-        // Pre-scale the camera frame to overlay dimensions on this thread
-        // so CompositeOnto can do a fast GPU-only blit without staging.
-        const UINT absStride = actualRowBytes;
 
         // Compute overlay dimensions if not yet done.
         if( m_overlayW == 0 )
@@ -407,37 +428,56 @@ void WebcamCapture::CaptureThread()
             // NO D3D calls here — the capture thread must not touch the
             // recording session's D3D device to avoid GPU contention.
             const UINT scaledStride = ovW * 4;
-            std::vector<BYTE> scaled( static_cast<size_t>( scaledStride ) * ovH );
+            const size_t scaledSize = static_cast<size_t>( scaledStride ) * ovH;
+            m_scaledPixels.resize( scaledSize );
+
+            const UINT32* srcPixels = reinterpret_cast<const UINT32*>( m_framePixels.data() );
+            UINT32* dstPixels = reinterpret_cast<UINT32*>( m_scaledPixels.data() );
+            const UINT srcW32 = m_camWidth;  // stride in uint32 units
 
             for( UINT y = 0; y < ovH; y++ )
             {
                 const UINT srcY = y * m_camHeight / ovH;
-                const BYTE* srcRow = framePixels.data() + static_cast<size_t>( srcY ) * absStride;
-                BYTE* dstRow = scaled.data() + y * scaledStride;
+                const UINT32* srcRow = srcPixels + static_cast<size_t>( srcY ) * srcW32;
+                UINT32* dstRow = dstPixels + static_cast<size_t>( y ) * ovW;
 
                 for( UINT x = 0; x < ovW; x++ )
                 {
                     const UINT srcX = x * m_camWidth / ovW;
-                    const BYTE* sp = srcRow + srcX * 4;
-                    BYTE* dp = dstRow + x * 4;
-                    dp[0] = sp[0];
-                    dp[1] = sp[1];
-                    dp[2] = sp[2];
-                    dp[3] = 0xFF;
+                    dstRow[x] = srcRow[srcX] | 0xFF000000u;
                 }
             }
 
             {
                 std::lock_guard<std::mutex> lock( m_frameLock );
-                m_pendingPixels = std::move( scaled );
+
+                LARGE_INTEGER afterScale;
+                QueryPerformanceCounter( &afterScale );
+                double scaleMs = static_cast<double>( afterScale.QuadPart - afterCopy.QuadPart ) * 1000.0 / perfFreq.QuadPart;
+                totalScaleMs += scaleMs;
+
+                m_pendingPixels.swap( m_scaledPixels );
                 m_newFrameReady = true;
                 frameCount++;
-                if( frameCount <= 3 )
+
+                LARGE_INTEGER afterLock;
+                QueryPerformanceCounter( &afterLock );
+                double lockMs = static_cast<double>( afterLock.QuadPart - afterScale.QuadPart ) * 1000.0 / perfFreq.QuadPart;
+                totalLockMs += lockMs;
+
+                double frameIntervalMs = static_cast<double>( afterLock.QuadPart - lastFrameTime.QuadPart ) * 1000.0 / perfFreq.QuadPart;
+                lastFrameTime = afterLock;
+
+                if( frameCount <= 5 || ( frameCount % 30 ) == 0 )
                 {
-                    wchar_t msg[256];
-                    swprintf_s( msg, L"[WebcamCapture] Got frame %d: cam=%ux%u overlay=%ux%u stride=%u\n",
+                    wchar_t msg[512];
+                    swprintf_s( msg, L"[WebcamCapture] frame %d: cam=%ux%u overlay=%ux%u "
+                                L"read=%.1fms copy=%.1fms scale=%.1fms lock=%.1fms "
+                                L"interval=%.1fms avgRead=%.1f avgCopy=%.1f avgScale=%.1f\n",
                                  frameCount, m_camWidth, m_camHeight, ovW, ovH,
-                                 actualRowBytes );
+                                 readMs, copyMs, scaleMs, lockMs, frameIntervalMs,
+                                 totalReadMs / frameCount, totalCopyMs / frameCount,
+                                 totalScaleMs / frameCount );
                     OutputDebugStringW( msg );
                 }
             }
@@ -540,6 +580,8 @@ void WebcamCapture::ComputeOverlayDimensions()
 //----------------------------------------------------------------------------
 bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 {
+    m_compositeCount++;
+
     // If the capture thread has new pixels, upload them to the cached
     // GPU texture.  Use try_lock so we NEVER block the encoder callback.
     // If the lock is contended, just reuse the previous cached texture.
@@ -547,31 +589,60 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     {
         if( m_newFrameReady && !m_pendingPixels.empty() && m_overlayW > 0 && m_overlayH > 0 )
         {
-            D3D11_TEXTURE2D_DESC texDesc = {};
-            texDesc.Width = m_overlayW;
-            texDesc.Height = m_overlayH;
-            texDesc.MipLevels = 1;
-            texDesc.ArraySize = 1;
-            texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-            texDesc.SampleDesc.Count = 1;
-            texDesc.Usage = D3D11_USAGE_DEFAULT;
-            texDesc.BindFlags = 0;
+            m_uploadCount++;
 
-            D3D11_SUBRESOURCE_DATA initData = {};
-            initData.pSysMem = m_pendingPixels.data();
-            initData.SysMemPitch = m_overlayW * 4;
-
-            winrt::com_ptr<ID3D11Texture2D> newTex;
-            if( SUCCEEDED( m_d3dDevice->CreateTexture2D( &texDesc, &initData, newTex.put() ) ) )
+            // Recreate the texture if dimensions changed.
+            if( m_texW != m_overlayW || m_texH != m_overlayH )
             {
-                m_cachedOverlay = newTex;
+                m_overlayTex = nullptr;
+
+                D3D11_TEXTURE2D_DESC texDesc = {};
+                texDesc.Width = m_overlayW;
+                texDesc.Height = m_overlayH;
+                texDesc.MipLevels = 1;
+                texDesc.ArraySize = 1;
+                texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                texDesc.SampleDesc.Count = 1;
+                texDesc.Usage = D3D11_USAGE_DEFAULT;
+                texDesc.BindFlags = 0;
+
+                if( FAILED( m_d3dDevice->CreateTexture2D( &texDesc, nullptr, m_overlayTex.put() ) ) )
+                {
+                    m_overlayTex = nullptr;
+                    m_newFrameReady = false;
+                    m_frameLock.unlock();
+                    return false;
+                }
+                m_texW = m_overlayW;
+                m_texH = m_overlayH;
             }
+
+            // Upload new pixels.  UpdateSubresource + CopySubresourceRegion
+            // on the same immediate context are serialized by the runtime,
+            // so there is no read-write hazard.
+            m_d3dContext->UpdateSubresource(
+                m_overlayTex.get(), 0, nullptr,
+                m_pendingPixels.data(), m_overlayW * 4, 0 );
+
+            m_hasOverlay = true;
             m_newFrameReady = false;
         }
         m_frameLock.unlock();
     }
+    else
+    {
+        m_lockFailCount++;
+    }
 
-    if( !m_cachedOverlay )
+    if( ( m_compositeCount % 30 ) == 0 )
+    {
+        wchar_t msg[256];
+        swprintf_s( msg, L"[WebcamCapture] Composite: calls=%d uploads=%d lockFails=%d hasOverlay=%d\n",
+                     m_compositeCount, m_uploadCount, m_lockFailCount, m_hasOverlay ? 1 : 0 );
+        OutputDebugStringW( msg );
+    }
+
+    if( !m_hasOverlay )
         return false;
 
     // Fast GPU-only blit.
@@ -588,7 +659,7 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 
     m_d3dContext->CopySubresourceRegion(
         target, 0, destX, destY, 0,
-        m_cachedOverlay.get(), 0, &srcBox );
+        m_overlayTex.get(), 0, &srcBox );
 
     return true;
 }
