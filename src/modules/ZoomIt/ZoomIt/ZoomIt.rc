@@ -187,13 +187,13 @@ BEGIN
     LTEXT           "Pen Control ",IDC_PEN_CONTROL,7,38,40,8
     LTEXT           "Change the pen width by pressing left Ctrl and using the mouse wheel or the up and down arrow keys.",IDC_STATIC,19,48,218,16
     LTEXT           "Colors",IDC_COLORS,7,70,21,8
-    LTEXT           "Change the pen color by pressing R (red), G (green), B (blue),\nO (orange), Y (yellow) or P (pink).",IDC_STATIC,19,80,218,16
+    LTEXT           "Change the pen color by pressing R (red), G (green), B (blue),\nO (orange), Y (yellow), P (pink), W (white) or K (black).",IDC_STATIC,19,80,218,16
     LTEXT           "Highlight and Blur",IDC_HIGHLIGHT_AND_BLUR,7,102,58,8
     LTEXT           "Hold Shift while pressing a color key for a translucent highlighter color. Press X for blur or Shift+X for a stronger blur.",IDC_STATIC,19,113,218,16
     LTEXT           "Shapes",IDC_SHAPES,7,134,23,8
     LTEXT           "Draw a line by holding down the Shift key, a rectangle with the Ctrl key, an ellipse with the Tab key and an arrow with Shift+Ctrl.",IDC_STATIC,19,144,218,16
     LTEXT           "Screen",IDC_SCREEN,7,166,22,8
-    LTEXT           "Clear the screen for a sketch pad by pressing W (white) or K (black). Copy a zoomed screen with Ctrl+C or save it by typing Ctrl+S. Crop the copy or save region by entering Ctrl+Shift instead of Ctrl.",IDC_STATIC,19,176,218,24
+    LTEXT           "Clear the screen for a sketch pad by pressing Ctrl+W (white) or Ctrl+K (black). Copy a zoomed screen with Ctrl+C or save it by typing Ctrl+S. Crop the copy or save region by entering Ctrl+Shift instead of Ctrl.",IDC_STATIC,19,176,218,24
     CONTROL         "",IDC_DRAW_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,73,207,80,12
     LTEXT           "Draw w/out Zoom:",IDC_STATIC,7,210,63,11
 END
@@ -260,30 +260,29 @@ RECORD DIALOGEX 0, 0, 263, 228
 STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_SYSMENU
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
-    CONTROL         "",IDC_RECORD_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,61,83,80,12
-    LTEXT           "Record Toggle:",IDC_STATIC,7,85,54,8
-    LTEXT           "Record video of the unzoomed live screen or a static zoomed session by entering the recording hot key and finish the recording by entering it again. ",IDC_STATIC,7,7,248,28
-    LTEXT           "Note: Recording is only available on Windows 10 (version 1903) and higher.",IDC_STATIC,7,70,249,12
-    LTEXT           "Scaling:",IDC_STATIC,30,102,26,8
-    COMBOBOX        IDC_RECORD_SCALING,61,101,26,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Format:",IDC_STATIC,30,120,26,8
-    COMBOBOX        IDC_RECORD_FORMAT,61,118,60,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Frame Rate:",IDC_STATIC,119,102,44,8,NOT WS_VISIBLE
-    COMBOBOX        IDC_RECORD_FRAME_RATE,166,101,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,28,245,19
+    CONTROL         "",IDC_RECORD_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,61,71,80,12
+    LTEXT           "Record Toggle:",IDC_STATIC,7,73,54,8
+    LTEXT           "Record video of the unzoomed live screen or a static zoomed session by entering the recording hot key and finish the recording by entering it again. ",IDC_STATIC,7,7,248,22
+    LTEXT           "Scaling:",IDC_STATIC,30,90,26,8
+    COMBOBOX        IDC_RECORD_SCALING,61,89,26,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Format:",IDC_STATIC,30,108,26,8
+    COMBOBOX        IDC_RECORD_FORMAT,61,106,60,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Frame Rate:",IDC_STATIC,119,90,44,8,NOT WS_VISIBLE
+    COMBOBOX        IDC_RECORD_FRAME_RATE,166,89,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,29,245,18
     LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,48,251,19
-    CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,8,136,83,10
-    CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,125,135,83,10
-    COMBOBOX        IDC_MICROPHONE,81,149,128,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,34,151,47,8
-    CONTROL         "Show &webcam overlay",IDC_WEBCAM_OVERLAY,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,165,86,10
-    LTEXT           "Camera:",IDC_WEBCAM_DEVICE_LABEL,46,179,28,8
-    COMBOBOX        IDC_WEBCAM_DEVICE,82,177,127,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Position:",IDC_WEBCAM_POSITION_LABEL,33,197,32,8
-    COMBOBOX        IDC_WEBCAM_POSITION,64,195,55,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Size:",IDC_WEBCAM_SIZE_LABEL,137,197,20,8
-    COMBOBOX        IDC_WEBCAM_SIZE,159,195,50,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    PUSHBUTTON      "&Trim",IDC_TRIM_FILE,207,213,53,14
+    CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,8,124,83,10
+    CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,125,123,83,10
+    COMBOBOX        IDC_MICROPHONE,81,137,128,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,34,139,47,8
+    CONTROL         "Show &webcam overlay",IDC_WEBCAM_OVERLAY,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,153,86,10
+    LTEXT           "Camera:",IDC_WEBCAM_DEVICE_LABEL,46,167,28,8
+    COMBOBOX        IDC_WEBCAM_DEVICE,82,165,127,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Position:",IDC_WEBCAM_POSITION_LABEL,33,185,32,8
+    COMBOBOX        IDC_WEBCAM_POSITION,64,183,55,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Size:",IDC_WEBCAM_SIZE_LABEL,137,185,20,8
+    COMBOBOX        IDC_WEBCAM_SIZE,159,183,50,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "&Trim",IDC_TRIM_FILE,208,204,53,14
 END
 
 SNIP DIALOGEX 0, 0, 260, 80

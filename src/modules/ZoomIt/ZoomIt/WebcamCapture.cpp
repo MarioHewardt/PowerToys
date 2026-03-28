@@ -113,8 +113,12 @@ bool WebcamCapture::InitSourceReader()
     hr = MFCreateAttributes( readerAttrs.put(), 2 );
     if( FAILED( hr ) ) return false;
 
-    // Enable hardware transforms so the source reader decodes NV12/MJPEG → BGRA.
-    readerAttrs->SetUINT32( MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE );
+    // Enable the software video processor so the source reader converts
+    // NV12/YUY2/MJPEG → BGRA.  Do NOT enable MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS:
+    // on Intel iGPU systems the hardware MFT probing loads/unloads the entire
+    // GPU driver stack repeatedly (libmfxhw64 → igc64 → msg_end exception ×N),
+    // blocking InitSourceReader for tens of seconds and starving the webcam
+    // overlay of frames for the duration of short recordings.
     readerAttrs->SetUINT32( MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE );
 
     hr = MFCreateSourceReaderFromMediaSource( mediaSource.get(), readerAttrs.get(),
@@ -125,18 +129,25 @@ bool WebcamCapture::InitSourceReader()
     // is the format the MF video processor most reliably converts to from
     // NV12/YUY2/MJPEG.  ARGB32 (BGRA with alpha) is not supported by many
     // cameras' video processor chains.
+    //
+    // Request native-size first (no explicit frame size).  The MF software
+    // video processor converts color space reliably but does NOT always
+    // resize: on some cameras SetCurrentMediaType(640x480) succeeds yet
+    // ReadSample still delivers buffers at the camera's native resolution
+    // (e.g. 1920x1080).  Since CaptureThread pre-scales every frame to
+    // overlay dimensions anyway, native-size avoids the mismatch and is
+    // equally fast.
     const GUID formatsToTry[] = { MFVideoFormat_RGB32, MFVideoFormat_ARGB32 };
     bool formatSet = false;
 
     for( const auto& subtype : formatsToTry )
     {
-        // Try with 640x480 first.
+        // Try without specifying resolution (native-size — most reliable).
         winrt::com_ptr<IMFMediaType> outputType;
         hr = MFCreateMediaType( outputType.put() );
         if( FAILED( hr ) ) continue;
         outputType->SetGUID( MF_MT_MAJOR_TYPE, MFMediaType_Video );
         outputType->SetGUID( MF_MT_SUBTYPE, subtype );
-        MFSetAttributeSize( outputType.get(), MF_MT_FRAME_SIZE, 640, 480 );
 
         hr = m_sourceReader->SetCurrentMediaType(
             static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
@@ -144,12 +155,14 @@ bool WebcamCapture::InitSourceReader()
             outputType.get() );
         if( SUCCEEDED( hr ) ) { formatSet = true; break; }
 
-        // Try without specifying resolution.
+        // Fallback: try explicit 640x480 in case the driver requires
+        // a specific frame size.
         outputType = nullptr;
         hr = MFCreateMediaType( outputType.put() );
         if( FAILED( hr ) ) continue;
         outputType->SetGUID( MF_MT_MAJOR_TYPE, MFMediaType_Video );
         outputType->SetGUID( MF_MT_SUBTYPE, subtype );
+        MFSetAttributeSize( outputType.get(), MF_MT_FRAME_SIZE, 640, 480 );
 
         hr = m_sourceReader->SetCurrentMediaType(
             static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
@@ -196,6 +209,15 @@ bool WebcamCapture::Start()
 {
     m_running.store( true );
     m_thread = std::thread( &WebcamCapture::CaptureThread, this );
+
+    // Wait for the first frame so the webcam overlay is ready before
+    // recording begins.  Timeout after 5 s to avoid blocking forever
+    // if the camera fails to produce a frame.
+    {
+        std::unique_lock<std::mutex> lock( m_readyMutex );
+        m_readyCV.wait_for( lock, std::chrono::seconds( 5 ),
+                            [this]{ return m_firstFrameCaptured; } );
+    }
     return true;
 }
 
@@ -265,35 +287,113 @@ void WebcamCapture::CaptureThread()
         if( !sample )
             continue;
 
-        // Get the buffer and extract raw BGRA pixel data.
+        // Get the buffer and flatten it into a known-tight BGRA buffer.
+        // Use IMF2DBuffer + MFCopyImage when available so the true source
+        // stride is honored. Some camera/MF pipelines expose padded or
+        // otherwise non-trivial row pitch, and assuming tight packing
+        // produces the striped corruption seen in the overlay.
         winrt::com_ptr<IMFMediaBuffer> buffer;
-        hr = sample->ConvertToContiguousBuffer( buffer.put() );
-        if( FAILED( hr ) )
-        {
-            OutputDebugStringW( L"[WebcamCapture] ConvertToContiguousBuffer failed\n" );
+        DWORD bufferCount = 0;
+        hr = sample->GetBufferCount( &bufferCount );
+        if( FAILED( hr ) || bufferCount == 0 )
             continue;
-        }
 
-        BYTE* data = nullptr;
-        LONG stride = 0;
-        auto buffer2D = buffer.try_as<IMF2DBuffer>();
-        if( buffer2D )
+        if( bufferCount == 1 )
         {
-            hr = buffer2D->Lock2D( &data, &stride );
+            hr = sample->GetBufferByIndex( 0, buffer.put() );
         }
         else
         {
+            hr = sample->ConvertToContiguousBuffer( buffer.put() );
+        }
+        if( FAILED( hr ) || !buffer )
+        {
+            OutputDebugStringW( L"[WebcamCapture] Failed to get sample buffer\n" );
+            continue;
+        }
+
+        const UINT rowBytes = m_camWidth * 4;
+        const DWORD frameBytes = static_cast<DWORD>( rowBytes * m_camHeight );
+        std::vector<BYTE> framePixels( frameBytes );
+
+        bool copiedFrame = false;
+        if( auto buffer2D = buffer.try_as<IMF2DBuffer>() )
+        {
+            BYTE* srcData = nullptr;
+            LONG srcStride = 0;
+            hr = buffer2D->Lock2D( &srcData, &srcStride );
+            if( SUCCEEDED( hr ) && srcData != nullptr )
+            {
+                hr = MFCopyImage( framePixels.data(), rowBytes,
+                                  srcData, srcStride,
+                                  rowBytes, m_camHeight );
+                buffer2D->Unlock2D();
+                copiedFrame = SUCCEEDED( hr );
+            }
+        }
+
+        if( !copiedFrame )
+        {
+            BYTE* data = nullptr;
             DWORD maxLen = 0, curLen = 0;
             hr = buffer->Lock( &data, &maxLen, &curLen );
-            stride = static_cast<LONG>( m_camWidth * 4 );
+            if( FAILED( hr ) || !data )
+                continue;
+
+            // Safety net: if the buffer is larger than the negotiated frame
+            // size, the video processor didn't actually resize — the real
+            // frame is at the camera's native resolution.  Re-derive the
+            // dimensions from the buffer so we copy the correct pixels.
+            if( curLen > frameBytes && curLen > 0 )
+            {
+                // Check common heights to find one that divides evenly
+                // into 4-byte-per-pixel rows.
+                const UINT heights[] = { 1080, 720, 480, 960, 1440, 2160 };
+                for( UINT h : heights )
+                {
+                    if( curLen % ( h * 4 ) == 0 )
+                    {
+                        UINT w = curLen / ( h * 4 );
+                        if( w >= 160 && w <= 7680 )
+                        {
+                            wchar_t msg[256];
+                            swprintf_s( msg, L"[WebcamCapture] Buffer mismatch: "
+                                        L"negotiated %ux%u (%u bytes) but buffer is "
+                                        L"%u bytes — using %ux%u\n",
+                                        m_camWidth, m_camHeight, frameBytes,
+                                        curLen, w, h );
+                            OutputDebugStringW( msg );
+                            m_camWidth = w;
+                            m_camHeight = h;
+                            break;
+                        }
+                    }
+                }
+
+                // Re-derive sizes with updated dimensions.
+                const UINT newRowBytes = m_camWidth * 4;
+                const DWORD newFrameBytes = static_cast<DWORD>( newRowBytes * m_camHeight );
+                framePixels.resize( newFrameBytes );
+                memcpy_s( framePixels.data(), newFrameBytes, data, min( curLen, newFrameBytes ) );
+            }
+            else
+            {
+                memcpy_s( framePixels.data(), frameBytes, data, min( curLen, frameBytes ) );
+            }
+            buffer->Unlock();
+            copiedFrame = true;
         }
-        if( FAILED( hr ) || !data )
+
+        if( !copiedFrame )
             continue;
+
+        // Use the current m_camWidth (which may have been corrected by
+        // the buffer-mismatch safety net above).
+        const UINT actualRowBytes = m_camWidth * 4;
 
         // Pre-scale the camera frame to overlay dimensions on this thread
         // so CompositeOnto can do a fast GPU-only blit without staging.
-        const UINT rowBytes = m_camWidth * 4;
-        const UINT absStride = ( stride > 0 ) ? static_cast<UINT>( stride ) : rowBytes;
+        const UINT absStride = actualRowBytes;
 
         // Compute overlay dimensions if not yet done.
         if( m_overlayW == 0 )
@@ -312,7 +412,7 @@ void WebcamCapture::CaptureThread()
             for( UINT y = 0; y < ovH; y++ )
             {
                 const UINT srcY = y * m_camHeight / ovH;
-                const BYTE* srcRow = data + srcY * absStride;
+                const BYTE* srcRow = framePixels.data() + static_cast<size_t>( srcY ) * absStride;
                 BYTE* dstRow = scaled.data() + y * scaledStride;
 
                 for( UINT x = 0; x < ovW; x++ )
@@ -334,18 +434,23 @@ void WebcamCapture::CaptureThread()
                 frameCount++;
                 if( frameCount <= 3 )
                 {
-                    wchar_t msg[128];
-                    swprintf_s( msg, L"[WebcamCapture] Got frame %d: cam=%ux%u overlay=%ux%u\n",
-                                 frameCount, m_camWidth, m_camHeight, ovW, ovH );
+                    wchar_t msg[256];
+                    swprintf_s( msg, L"[WebcamCapture] Got frame %d: cam=%ux%u overlay=%ux%u stride=%u\n",
+                                 frameCount, m_camWidth, m_camHeight, ovW, ovH,
+                                 actualRowBytes );
                     OutputDebugStringW( msg );
                 }
             }
+
+            // Signal that the first frame is ready so Start() can unblock.
+            if( frameCount == 1 )
+            {
+                std::lock_guard<std::mutex> readyLock( m_readyMutex );
+                m_firstFrameCaptured = true;
+                m_readyCV.notify_one();
+            }
         }
 
-        if( buffer2D )
-            buffer2D->Unlock2D();
-        else
-            buffer->Unlock();
     }
 
     // Release MF objects on the thread that created them.
@@ -426,10 +531,12 @@ void WebcamCapture::ComputeOverlayDimensions()
 //----------------------------------------------------------------------------
 // WebcamCapture::CompositeOnto
 //
-// Composites the pre-scaled webcam overlay onto the target texture using
-// a GPU-only path: create a texture from CPU pixels via D3D11_SUBRESOURCE_DATA
-// then CopySubresourceRegion to paste it at the right position.
-// No staging textures, no Map/Unmap, no GPU↔CPU sync.
+// Composites the pre-scaled webcam overlay onto the target texture.
+// When a new webcam frame arrives, create a fresh GPU texture from the
+// CPU pixels using initial subresource data, then copy that texture into
+// the target surface. This is a conservative path that avoids both the
+// UpdateSubresource and Map/Unmap upload behaviors that appear to vary
+// across desktop Intel driver stacks.
 //----------------------------------------------------------------------------
 bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 {
@@ -440,44 +547,24 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     {
         if( m_newFrameReady && !m_pendingPixels.empty() && m_overlayW > 0 && m_overlayH > 0 )
         {
-            bool recreateTexture = true;
-            if( m_cachedOverlay )
-            {
-                D3D11_TEXTURE2D_DESC existingDesc = {};
-                m_cachedOverlay->GetDesc( &existingDesc );
-                recreateTexture = existingDesc.Width != m_overlayW ||
-                                  existingDesc.Height != m_overlayH ||
-                                  existingDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM;
-            }
+            D3D11_TEXTURE2D_DESC texDesc = {};
+            texDesc.Width = m_overlayW;
+            texDesc.Height = m_overlayH;
+            texDesc.MipLevels = 1;
+            texDesc.ArraySize = 1;
+            texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            texDesc.SampleDesc.Count = 1;
+            texDesc.Usage = D3D11_USAGE_DEFAULT;
+            texDesc.BindFlags = 0;
 
-            if( recreateTexture )
-            {
-                D3D11_TEXTURE2D_DESC texDesc = {};
-                texDesc.Width = m_overlayW;
-                texDesc.Height = m_overlayH;
-                texDesc.MipLevels = 1;
-                texDesc.ArraySize = 1;
-                texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                texDesc.SampleDesc.Count = 1;
-                texDesc.Usage = D3D11_USAGE_DEFAULT;
-                texDesc.BindFlags = 0;
+            D3D11_SUBRESOURCE_DATA initData = {};
+            initData.pSysMem = m_pendingPixels.data();
+            initData.SysMemPitch = m_overlayW * 4;
 
-                winrt::com_ptr<ID3D11Texture2D> newTex;
-                if( SUCCEEDED( m_d3dDevice->CreateTexture2D( &texDesc, nullptr, newTex.put() ) ) )
-                {
-                    m_cachedOverlay = newTex;
-                }
-            }
-
-            if( m_cachedOverlay )
+            winrt::com_ptr<ID3D11Texture2D> newTex;
+            if( SUCCEEDED( m_d3dDevice->CreateTexture2D( &texDesc, &initData, newTex.put() ) ) )
             {
-                m_d3dContext->UpdateSubresource(
-                    m_cachedOverlay.get(),
-                    0,
-                    nullptr,
-                    m_pendingPixels.data(),
-                    m_overlayW * 4,
-                    0 );
+                m_cachedOverlay = newTex;
             }
             m_newFrameReady = false;
         }

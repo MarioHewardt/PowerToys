@@ -2982,16 +2982,16 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
             }
-            else if (LOWORD(wParam) == IDC_WEBCAM_OVERLAY) {
-                bool isGif = (g_RecordingFormat == RecordingFormat::GIF);
-                bool webcamEnabled = !isGif && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE_LABEL), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION_LABEL), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
-            }
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == IDC_WEBCAM_OVERLAY) {
+            bool isGif = (g_RecordingFormat == RecordingFormat::GIF);
+            bool webcamEnabled = !isGif && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE_LABEL), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION_LABEL), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
         }
 
         switch ( LOWORD( wParam )) {
@@ -4953,7 +4953,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
 
         // Webcam size combo
         {
-            const wchar_t* sizes[] = { L"Small (15%)", L"Medium (25%)", L"Large (33%)" };
+            const wchar_t* sizes[] = { L"Small", L"Medium", L"Large" };
             for( int i = 0; i < 3; i++ )
                 SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE ), static_cast<UINT>(CB_ADDSTRING), static_cast<WPARAM>(0), reinterpret_cast<LPARAM>(sizes[i]) );
             SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamSize), static_cast<LPARAM>(0) );
@@ -8722,8 +8722,8 @@ LRESULT APIENTRY MainWndProc(
 
     case WM_KEYDOWN:
 
-        if( (g_TypeMode != TypeModeOff) && g_HaveTyped && static_cast<char>(wParam) != VK_UP && static_cast<char>(wParam) != VK_DOWN &&
-            (isprint( static_cast<char>(wParam)) ||
+        if( (g_TypeMode != TypeModeOff) && g_HaveTyped && wParam != VK_UP && wParam != VK_DOWN &&
+            (( wParam <= 127 && isprint( static_cast<int>( wParam ) ) ) ||
             wParam == VK_RETURN || wParam == VK_DELETE || wParam == VK_BACK )) {
 
             if( wParam == VK_RETURN ) {
@@ -8826,6 +8826,54 @@ LRESULT APIENTRY MainWndProc(
         case 'G':
         case 'X':
         case 'P':
+        case 'W':
+        case 'K':
+            // Ctrl+K / Ctrl+W: blank screen (sketch pad)
+            // Also triggered internally via SendMessage with lParam == LIVE_DRAW_ZOOM.
+            if( (wParam == 'K' || wParam == 'W') &&
+                ((GetKeyState( VK_CONTROL ) & 0x8000) || lParam == LIVE_DRAW_ZOOM) )
+            {
+                // Break timer: change background color
+                if( g_TimerActive )
+                {
+                    g_BreakBackgroundColor = ( wParam == 'K' ) ? 1 : 0;
+                    reg.WriteRegSettings( RegSettings );
+                    InvalidateRect( hWnd, NULL, FALSE );
+                    break;
+                }
+
+                // Block user-driven sketch pad in liveDraw
+                if( lParam != LIVE_DRAW_ZOOM
+                    && ( GetWindowLongPtr( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED ) )
+                {
+                    break;
+                }
+
+                // Don't allow screen blanking while we've got the typing cursor active
+                // because we don't really handle going from white to black.
+                if( g_Zoomed && (g_TypeMode == TypeModeOff)) {
+
+                    if( !g_Drawing ) {
+
+                        SendMessage( hWnd, WM_LBUTTONDOWN, 0, MAKELPARAM( cursorPos.x, cursorPos.y));
+                    }
+                    // Restore area where cursor was previously
+                    RestoreCursorArea( hdcScreenCompat, hdcScreenCursorCompat, prevPt );
+                    PushDrawUndo( hdcScreenCompat, &drawUndoList, width, height );
+                    g_BlankedScreen = static_cast<int>(wParam);
+                    rc.top = rc.left = 0;
+                    rc.bottom = height;
+                    rc.right = width;
+                    BlankScreenArea( hdcScreenCompat, &rc, g_BlankedScreen );
+                    InvalidateRect( hWnd, NULL, FALSE );
+
+                    // Save area that's going to be occupied by new cursor position
+                    SaveCursorArea( hdcScreenCursorCompat, hdcScreenCompat, prevPt );
+                    SendMessage( hWnd, WM_MOUSEMOVE, 0, MAKELPARAM( prevPt.x, prevPt.y ));
+                }
+                break;
+            }
+
             if( (g_Zoomed || g_TimerActive) && (g_TypeMode == TypeModeOff)) {
 
                 PDWORD	penColor;
@@ -8840,6 +8888,8 @@ LRESULT APIENTRY MainWndProc(
                 else if( wParam == 'Y' ) *penColor = COLOR_YELLOW;
                 else if( wParam == 'O' ) *penColor = COLOR_ORANGE;
                 else if( wParam == 'P' ) *penColor = COLOR_PINK;
+                else if( wParam == 'W' ) *penColor = COLOR_WHITE;
+                else if( wParam == 'K' ) *penColor = COLOR_BLACK;
                 else if( wParam == 'X' )
                 {
                     if( GetWindowLong( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED )
@@ -8924,48 +8974,6 @@ LRESULT APIENTRY MainWndProc(
             }
             break;
 
-        case 'W':
-        case 'K':
-            // Break timer: change background color
-            if( g_TimerActive )
-            {
-                g_BreakBackgroundColor = ( wParam == 'K' ) ? 1 : 0;
-                reg.WriteRegSettings( RegSettings );
-                InvalidateRect( hWnd, NULL, FALSE );
-                break;
-            }
-
-            // Block user-driven sketch pad in liveDraw
-            if( lParam != LIVE_DRAW_ZOOM
-                && ( GetWindowLongPtr( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED ) )
-            {
-                break;
-            }
-
-            // Don't allow screen blanking while we've got the typing cursor active
-            // because we don't really handle going from white to black.
-            if( g_Zoomed && (g_TypeMode == TypeModeOff)) {
-
-                if( !g_Drawing ) {
-
-                    SendMessage( hWnd, WM_LBUTTONDOWN, 0, MAKELPARAM( cursorPos.x, cursorPos.y));
-                }
-                // Restore area where cursor was previously
-                RestoreCursorArea( hdcScreenCompat, hdcScreenCursorCompat, prevPt );
-                PushDrawUndo( hdcScreenCompat, &drawUndoList, width, height );
-                g_BlankedScreen = static_cast<int>(wParam);
-                rc.top = rc.left = 0;
-                rc.bottom = height;
-                rc.right = width;
-                BlankScreenArea( hdcScreenCompat, &rc, g_BlankedScreen );
-                InvalidateRect( hWnd, NULL, FALSE );
-
-                // Save area that's going to be occupied by new cursor position
-                SaveCursorArea( hdcScreenCursorCompat, hdcScreenCompat, prevPt );
-                SendMessage( hWnd, WM_MOUSEMOVE, 0, MAKELPARAM( prevPt.x, prevPt.y ));
-            }
-            break;
-
         case 'E':
             // Don't allow erase while we have the typing cursor active
             if( g_HaveDrawn && (g_TypeMode == TypeModeOff)) {
@@ -8974,7 +8982,19 @@ LRESULT APIENTRY MainWndProc(
                 g_HaveDrawn = FALSE;
                 OutputDebug(L"Erase\n");
                 if(GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_LAYERED) {
-                    SendMessage(hWnd, WM_KEYDOWN, 'K', 0);
+                    // Blank the live-draw canvas to black directly.
+                    if( !g_Drawing ) {
+                        SendMessage( hWnd, WM_LBUTTONDOWN, 0, MAKELPARAM( cursorPos.x, cursorPos.y));
+                    }
+                    RestoreCursorArea( hdcScreenCompat, hdcScreenCursorCompat, prevPt );
+                    PushDrawUndo( hdcScreenCompat, &drawUndoList, width, height );
+                    g_BlankedScreen = 'K';
+                    rc.top = rc.left = 0;
+                    rc.bottom = height;
+                    rc.right = width;
+                    BlankScreenArea( hdcScreenCompat, &rc, g_BlankedScreen );
+                    SaveCursorArea( hdcScreenCursorCompat, hdcScreenCompat, prevPt );
+                    SendMessage( hWnd, WM_MOUSEMOVE, 0, MAKELPARAM( prevPt.x, prevPt.y ));
                 }
                 else {
                     BitBlt(hdcScreenCompat, 0, 0, bmp.bmWidth,

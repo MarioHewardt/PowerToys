@@ -89,6 +89,8 @@ typedef struct {
 #define COLOR_ORANGE	RGB(255,128,0)
 #define COLOR_YELLOW	RGB(255, 255, 0 )
 #define COLOR_PINK		RGB(255,128,255)
+#define COLOR_WHITE		RGB(255,255,255)
+#define COLOR_BLACK		RGB(0,0,0)
 #define COLOR_BLUR		RGB(112,112,112)
 
 #define DRAW_RECTANGLE	1
