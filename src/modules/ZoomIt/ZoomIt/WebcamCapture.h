@@ -17,6 +17,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -86,4 +87,10 @@ private:
     std::thread                         m_thread;
     std::atomic<bool>                   m_running{ false };
     bool                                m_mfStarted = false;
+
+    // Signalled once the first webcam frame has been captured so
+    // Start() can block until the overlay is ready.
+    std::mutex                          m_readyMutex;
+    std::condition_variable             m_readyCV;
+    bool                                m_firstFrameCaptured = false;
 };

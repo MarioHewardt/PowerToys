@@ -9105,7 +9105,7 @@ LRESULT APIENTRY MainWndProc(
 
                 } else if(g_DrawingShape) {
 
-                    SetROP2(hdcScreenCompat, R2_NOTXORPEN);
+                    SetROP2(hdcScreenCompat, R2_NOT);
 
                     // If a previous target rectangle exists, erase
                     // it by drawing another rectangle on top.
@@ -9625,7 +9625,7 @@ LRESULT APIENTRY MainWndProc(
                 // erase previous
                 if (!PEN_COLOR_HIGHLIGHT(g_PenColor))
                 {
-                    SetROP2(hdcScreenCompat, R2_NOTXORPEN);
+                    SetROP2(hdcScreenCompat, R2_NOT);
                     DrawShape(g_DrawingShape, hdcScreenCompat, &g_rcRectangle);
                 }
 
