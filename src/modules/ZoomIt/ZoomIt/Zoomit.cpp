@@ -9107,6 +9107,10 @@ LRESULT APIENTRY MainWndProc(
 
                     SetROP2(hdcScreenCompat, R2_NOT);
 
+                    // Select a hollow brush so GDI Rectangle/Ellipse draw
+                    // outlines only during rubber-banding (no fill).
+                    HBRUSH hOldBrush = static_cast<HBRUSH>(SelectObject( hdcScreenCompat, GetStockObject( NULL_BRUSH ) ));
+
                     // If a previous target rectangle exists, erase
                     // it by drawing another rectangle on top.
                     if( g_rcRectangle.top != g_rcRectangle.bottom ||
@@ -9188,6 +9192,7 @@ LRESULT APIENTRY MainWndProc(
                     }
 
                     prevPenWidth = g_PenWidth;
+                    SelectObject( hdcScreenCompat, hOldBrush );
                     SetROP2( hdcScreenCompat, R2_NOP );
                 }
                 else if (g_Tracing) {
@@ -9622,11 +9627,13 @@ LRESULT APIENTRY MainWndProc(
             } else if (g_rcRectangle.top != g_rcRectangle.bottom ||
                         g_rcRectangle.left != g_rcRectangle.right ) {
 
-                // erase previous
+                // erase previous rubber-band outline
                 if (!PEN_COLOR_HIGHLIGHT(g_PenColor))
                 {
+                    HBRUSH hNullBrush = static_cast<HBRUSH>(SelectObject( hdcScreenCompat, GetStockObject( NULL_BRUSH ) ));
                     SetROP2(hdcScreenCompat, R2_NOT);
                     DrawShape(g_DrawingShape, hdcScreenCompat, &g_rcRectangle);
+                    SelectObject( hdcScreenCompat, hNullBrush );
                 }
 
                 // Draw the final shape
