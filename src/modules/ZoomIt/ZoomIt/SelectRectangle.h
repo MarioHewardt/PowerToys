@@ -44,6 +44,7 @@ private:
     RECT m_selectedRect{};
     COLORREF m_borderColor = RGB( 255, 222, 0 ); // default: yellow (matches capture API)
     bool m_recordingActive = false; // true once first frame is captured
+    bool m_fullMonitor = false;       // true when recording full screen
 
     bool m_cancel = false;
     const wchar_t* m_className = L"ZoomitSelectRectangle";

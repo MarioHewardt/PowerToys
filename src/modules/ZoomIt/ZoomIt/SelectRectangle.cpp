@@ -38,6 +38,7 @@ bool SelectRectangle::Start( HWND ownerWindow, bool fullMonitor )
     m_stopping = false;
     m_borderColor = RGB( 255, 222, 0 ); // Reset to yellow; turns orange once first frame is captured.
     m_recordingActive = false;           // Reset so SetRecordingActive fires on next recording.
+    m_fullMonitor = fullMonitor;
 
     // All-builds diagnostic for full-screen recording border.
     if( fullMonitor )
@@ -276,31 +277,34 @@ void SelectRectangle::SetRecordingActive()
     m_recordingActive = true;
     m_borderColor = RGB( 255, 127, 39 );  // #FF7F27 orange
 
-    // Rebuild the window region with a thicker border (4 logical px instead
-    // of 2) so the color change is clearly visible even on high-DPI monitors.
-    RECT rect;
-    GetClientRect( m_window.get(), &rect );
-    int thickWidth = ScaleForDpi( 4, m_dpi );
-
-    wil::unique_hrgn region{ CreateRectRgnIndirect( &rect ) };
-    RECT inner = rect;
-    InflateRect( &inner, -thickWidth, -thickWidth );
-    // Clamp to prevent inside-out rect on very small windows.
-    if( inner.left >= inner.right || inner.top >= inner.bottom )
+    // Rebuild the window region: full-screen gets a thick 4px border so the
+    // color change is clearly visible; region recording gets a slim 1px
+    // border to stay unobtrusive.
     {
-        SetRectEmpty( &inner );
+        RECT rect;
+        GetClientRect( m_window.get(), &rect );
+        int borderWidth = ScaleForDpi( m_fullMonitor ? 4 : 1, m_dpi );
+
+        wil::unique_hrgn region{ CreateRectRgnIndirect( &rect ) };
+        RECT inner = rect;
+        InflateRect( &inner, -borderWidth, -borderWidth );
+        // Clamp to prevent inside-out rect on very small windows.
+        if( inner.left >= inner.right || inner.top >= inner.bottom )
+        {
+            SetRectEmpty( &inner );
+        }
+        wil::unique_hrgn insideRegion{ CreateRectRgnIndirect( &inner ) };
+        CombineRgn( region.get(), region.get(), insideRegion.get(), RGN_XOR );
+        SetWindowRgn( m_window.get(), region.release(), true );
     }
-    wil::unique_hrgn insideRegion{ CreateRectRgnIndirect( &inner ) };
-    CombineRgn( region.get(), region.get(), insideRegion.get(), RGN_XOR );
-    SetWindowRgn( m_window.get(), region.release(), true );
 
     // Force immediate synchronous repaint with the new color and region.
     RedrawWindow( m_window.get(), nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW );
 
     {
         wchar_t dbg[256];
-        swprintf_s( dbg, L"[RecBorder] SetRecordingActive: orange border applied, thickWidth=%d dpi=%u\n",
-                    thickWidth, m_dpi );
+        swprintf_s( dbg, L"[RecBorder] SetRecordingActive: orange border applied, fullMonitor=%d dpi=%u\n",
+                    m_fullMonitor ? 1 : 0, m_dpi );
         OutputDebugStringW( dbg );
     }
 }
