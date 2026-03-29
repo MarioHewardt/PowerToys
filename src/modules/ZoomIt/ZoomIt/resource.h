@@ -114,7 +114,8 @@
 #define IDC_CAPTURE_SYSTEM_AUDIO        1108
 #define IDC_MICROPHONE_LABEL            1109
 #define IDC_TRIM_FILE                   1110
-#define IDC_CHECK_LOCK_WORKSTATION      1113
+#define IDC_MIC_MONO_MIX                1111
+#define IDC_CHECK_LOCK_WORKSTATION      1112
 #define IDC_WEBCAM_OVERLAY              1115
 #define IDC_WEBCAM_DEVICE               1116
 #define IDC_WEBCAM_POSITION             1117

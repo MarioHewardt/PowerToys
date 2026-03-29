@@ -118,6 +118,16 @@
 #include <commctrl.h>
 #if defined(_M_X64) || defined(_M_IX86)
 #include <emmintrin.h>
+#if defined(_M_IX86)
+// _mm_cvtsi128_si64 is unavailable on 32-bit x86; emulate via _mm_storel_epi64.
+inline __int64 _mm_cvtsi128_si64_compat( __m128i v )
+{
+    __int64 r;
+    _mm_storel_epi64( reinterpret_cast<__m128i*>( &r ), v );
+    return r;
+}
+#define _mm_cvtsi128_si64 _mm_cvtsi128_si64_compat
+#endif
 #elif defined(_M_ARM64)
 #include <arm_neon.h>
 #endif
@@ -443,7 +453,10 @@ static void StitchLog( const wchar_t* format, ... )
         return;
     }
     va_list args;
+#pragma warning(push)
+#pragma warning(disable: 26492) // Don't use const_cast - unavoidable in va_start macro
     va_start( args, format );
+#pragma warning(pop)
     wchar_t buffer[1024]{};
     _vsnwprintf_s( buffer, _TRUNCATE, format, args );
     va_end( args );
@@ -3458,7 +3471,7 @@ static int ComputeTileAverageRgbDifference( const std::vector<BYTE>& aPixels,
     return static_cast<int>( diffSum / ( sampleCount * 3 ) );
 }
 
-static bool IsStrongFixedOverlayTile( int supports, int stationary, int scrolled )
+static constexpr bool IsStrongFixedOverlayTile( int supports, int stationary, int scrolled )
 {
     return supports >= 4 &&
            stationary >= 3 &&
@@ -3466,7 +3479,7 @@ static bool IsStrongFixedOverlayTile( int supports, int stationary, int scrolled
            stationary * 2 >= supports + 1;
 }
 
-static bool IsWeakFixedOverlayTile( int supports, int stationary, int scrolled )
+static constexpr bool IsWeakFixedOverlayTile( int supports, int stationary, int scrolled )
 {
     return supports >= 3 &&
            stationary >= 2 &&
@@ -4360,10 +4373,10 @@ skipTileMasking:
 
             if( fixedCount >= 2 )
             {
-                const int coreW = finalMaxX - finalMinX + 1;
-                const int coreH = finalMaxY - finalMinY + 1;
-                const int marginX = max( 24, coreW );
-                const int marginY = max( 24, coreH );
+                const int coreW2 = finalMaxX - finalMinX + 1;
+                const int coreH2 = finalMaxY - finalMinY + 1;
+                const int marginX = max( 24, coreW2 );
+                const int marginY = max( 24, coreH2 );
                 mask.eraseRect.left   = max( 0L, static_cast<long>( finalMinX ) - marginX );
                 mask.eraseRect.top    = max( 0L, static_cast<long>( finalMinY ) - marginY );
                 mask.eraseRect.right  = min( static_cast<long>( frameWidth ), static_cast<long>( finalMaxX ) + marginX + 2 );

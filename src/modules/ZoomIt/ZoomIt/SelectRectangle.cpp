@@ -40,14 +40,6 @@ bool SelectRectangle::Start( HWND ownerWindow, bool fullMonitor )
     m_recordingActive = false;           // Reset so SetRecordingActive fires on next recording.
     m_fullMonitor = fullMonitor;
 
-    // All-builds diagnostic for full-screen recording border.
-    if( fullMonitor )
-    {
-        wchar_t dbg[256];
-        swprintf_s( dbg, L"[RecBorder] SelectRectangle::Start entry fullMonitor=1 owner=%p\n", ownerWindow );
-        OutputDebugStringW( dbg );
-    }
-
     SelectRectangleDebugLog( L"[SelectRectangle] Start owner=%p fullMonitor=%d minSize=%d alpha=%u\n",
                              ownerWindow,
                              fullMonitor ? 1 : 0,
@@ -265,7 +257,7 @@ void SelectRectangle::ShowSelected()
 //
 // SelectRectangle::SetRecordingActive
 //
-// Changes the border to a thick solid red frame and rebuilds the window
+// Changes the border to a thick solid frame and rebuilds the window
 // region to make the recording state unmistakably visible.
 //
 //----------------------------------------------------------------------------
@@ -300,13 +292,6 @@ void SelectRectangle::SetRecordingActive()
 
     // Force immediate synchronous repaint with the new color and region.
     RedrawWindow( m_window.get(), nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW );
-
-    {
-        wchar_t dbg[256];
-        swprintf_s( dbg, L"[RecBorder] SetRecordingActive: orange border applied, fullMonitor=%d dpi=%u\n",
-                    m_fullMonitor ? 1 : 0, m_dpi );
-        OutputDebugStringW( dbg );
-    }
 }
 
 //----------------------------------------------------------------------------
@@ -340,12 +325,6 @@ LRESULT SelectRectangle::WindowProc( HWND window, UINT message, WPARAM wordParam
         return 0;
 
     case WM_DESTROY:
-        {
-            wchar_t dbg[256];
-            swprintf_s( dbg, L"[RecBorder] WM_DESTROY hwnd=%p selected=%d cancel=%d\n",
-                        window, m_selected ? 1 : 0, m_cancel ? 1 : 0 );
-            OutputDebugStringW( dbg );
-        }
         SelectRectangleDebugLog( L"[SelectRectangle] WM_DESTROY hwnd=%p\n", window );
         if( m_window.get() == window )
         {
@@ -444,13 +423,11 @@ LRESULT SelectRectangle::WindowProc( HWND window, UINT message, WPARAM wordParam
 
             RECT rect;
             GetClientRect( window, &rect );
-            {
-                wchar_t dbg[256];
-                swprintf_s( dbg, L"[SelectRectangle] WM_PAINT borderColor=0x%06X rect=(%ld,%ld)-(%ld,%ld) hwnd=%p\n",
-                            static_cast<unsigned>( m_borderColor ),
-                            rect.left, rect.top, rect.right, rect.bottom, window );
-                OutputDebugStringW( dbg );
-            }
+            SelectRectangleDebugLog( L"[SelectRectangle] WM_PAINT selected border rect=(%ld,%ld)-(%ld,%ld)\n",
+                                     rect.left,
+                                     rect.top,
+                                     rect.right,
+                                     rect.bottom );
 
             // Draw a border matching the Windows graphics capture API border.
             // Default: 1px outer color + 1px inner black.
