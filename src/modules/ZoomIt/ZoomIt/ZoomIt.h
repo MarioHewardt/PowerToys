@@ -66,6 +66,7 @@ type_pEnableThemeDialogTexture    pEnableThemeDialogTexture;
 #define WM_USER_MAGNIFY_CURSOR	WM_USER+108
 #define WM_USER_EXIT_MODE		WM_USER+109
 #define WM_USER_RELOAD_SETTINGS	WM_USER+110
+#define WM_USER_RECORDING_STARTED WM_USER+111
 
 typedef struct _TYPED_KEY {
     RECT		rc;
@@ -103,6 +104,10 @@ typedef struct {
 #define LIVE_DRAW_ZOOM   3
 
 #define PEN_COLOR_HIGHLIGHT(Pencolor)	((Pencolor >> 24) != 0xFF)
+
+// Debug output — compiles to nothing in Release builds.
+void OutputDebug(const TCHAR* format, ...);
+
 #define PEN_COLOR_BLUR(Pencolor)        ((Pencolor & 0x00FFFFFF) == COLOR_BLUR)
 
 #define CURSOR_SAVE_MARGIN  4

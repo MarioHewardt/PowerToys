@@ -29,10 +29,21 @@ public:
     void Show() { if( m_window ) ShowWindow( m_window.get(), SW_SHOWNA ); }
     void SetExcludeFromCapture( bool exclude ) { if( m_window ) SetWindowDisplayAffinity( m_window.get(), exclude ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE ); }
 
+    // Signal that recording is actively capturing frames.
+    // Changes the border to a thick red frame so the user can clearly
+    // distinguish "waiting to start" (thin yellow) from "recording" (thick red).
+    void SetRecordingActive();
+
+    // Diagnostic accessors for debug logging.
+    HWND Window() const { return m_window.get(); }
+    bool IsSelected() const { return m_selected; }
+
 private:
     BYTE m_alpha = 176;
     int m_minSize = 34;
     RECT m_selectedRect{};
+    COLORREF m_borderColor = RGB( 255, 222, 0 ); // default: yellow (matches capture API)
+    bool m_recordingActive = false; // true once first frame is captured
 
     bool m_cancel = false;
     const wchar_t* m_className = L"ZoomitSelectRectangle";

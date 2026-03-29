@@ -12,6 +12,9 @@
 #include "pch.h"
 #include "WebcamCapture.h"
 
+// Defined in Zoomit.cpp; compiles to nothing in Release builds.
+void OutputDebug(const TCHAR* format, ...);
+
 #pragma comment(lib, "mf.lib")
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -58,7 +61,7 @@ bool WebcamCapture::InitSourceReader()
     HRESULT hr = MFStartup( MF_VERSION );
     if( FAILED( hr ) )
     {
-        OutputDebugStringW( L"[WebcamCapture] MFStartup failed\n" );
+        OutputDebug( L"[WebcamCapture] MFStartup failed\n" );
         return false;
     }
     m_mfStarted = true;
@@ -66,7 +69,7 @@ bool WebcamCapture::InitSourceReader()
     // Create a media source for the camera.
     winrt::com_ptr<IMFAttributes> sourceAttrs;
     hr = MFCreateAttributes( sourceAttrs.put(), 1 );
-    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] MFCreateAttributes failed\n" ); return false; }
+    if( FAILED( hr ) ) { OutputDebug( L"[WebcamCapture] MFCreateAttributes failed\n" ); return false; }
 
     sourceAttrs->SetGUID( MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
                           MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID );
@@ -78,7 +81,7 @@ bool WebcamCapture::InitSourceReader()
     if( FAILED( hr ) || count == 0 )
     {
         if( ppDevices ) CoTaskMemFree( ppDevices );
-        OutputDebugStringW( L"[WebcamCapture] No cameras found\n" );
+        OutputDebug( L"[WebcamCapture] No cameras found\n" );
         return false;
     }
 
@@ -106,7 +109,7 @@ bool WebcamCapture::InitSourceReader()
     for( UINT32 i = 0; i < count; i++ )
         ppDevices[i]->Release();
     CoTaskMemFree( ppDevices );
-    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] ActivateObject failed\n" ); return false; }
+    if( FAILED( hr ) ) { OutputDebug( L"[WebcamCapture] ActivateObject failed\n" ); return false; }
 
     // Create source reader attributes (request BGRA output).
     winrt::com_ptr<IMFAttributes> readerAttrs;
@@ -123,7 +126,7 @@ bool WebcamCapture::InitSourceReader()
 
     hr = MFCreateSourceReaderFromMediaSource( mediaSource.get(), readerAttrs.get(),
                                               m_sourceReader.put() );
-    if( FAILED( hr ) ) { OutputDebugStringW( L"[WebcamCapture] MFCreateSourceReaderFromMediaSource failed\n" ); return false; }
+    if( FAILED( hr ) ) { OutputDebug( L"[WebcamCapture] MFCreateSourceReaderFromMediaSource failed\n" ); return false; }
 
     // Set the output media type.  Try RGB32 (BGRX, no alpha) first — this
     // is the format the MF video processor most reliably converts to from
@@ -173,7 +176,7 @@ bool WebcamCapture::InitSourceReader()
 
     if( !formatSet )
     {
-        OutputDebugStringW( L"[WebcamCapture] SetCurrentMediaType failed for all formats\n" );
+        OutputDebug( L"[WebcamCapture] SetCurrentMediaType failed for all formats\n" );
         return false;
     }
 
@@ -194,9 +197,7 @@ bool WebcamCapture::InitSourceReader()
     }
 
     {
-        wchar_t msg[128];
-        swprintf_s( msg, L"[WebcamCapture] Camera opened: %ux%u\n", m_camWidth, m_camHeight );
-        OutputDebugStringW( msg );
+        OutputDebug( L"[WebcamCapture] Camera opened: %ux%u\n", m_camWidth, m_camHeight );
     }
 
     return true;
@@ -263,17 +264,19 @@ void WebcamCapture::CaptureThread()
 
     if( !InitSourceReader() )
     {
-        OutputDebugStringW( L"[WebcamCapture] InitSourceReader failed on capture thread\n" );
+        OutputDebug( L"[WebcamCapture] InitSourceReader failed on capture thread\n" );
         CoUninitialize();
         return;
     }
 
-    OutputDebugStringW( L"[WebcamCapture] Capture thread started, reading frames...\n" );
+    OutputDebug( L"[WebcamCapture] Capture thread started, reading frames...\n" );
     int frameCount = 0;
+#if _DEBUG
     LARGE_INTEGER perfFreq = {}, lastFrameTime = {}, loopStart = {};
     QueryPerformanceFrequency( &perfFreq );
     QueryPerformanceCounter( &lastFrameTime );
     double totalReadMs = 0, totalCopyMs = 0, totalScaleMs = 0, totalLockMs = 0;
+#endif
 
     while( m_running.load() )
     {
@@ -281,7 +284,9 @@ void WebcamCapture::CaptureThread()
         LONGLONG timestamp = 0;
         winrt::com_ptr<IMFSample> sample;
 
+#if _DEBUG
         QueryPerformanceCounter( &loopStart );
+#endif
 
         HRESULT hr = m_sourceReader->ReadSample(
             static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM),
@@ -293,20 +298,20 @@ void WebcamCapture::CaptureThread()
 
         if( FAILED( hr ) || ( flags & MF_SOURCE_READERF_ENDOFSTREAM ) )
         {
-            wchar_t msg[128];
-            swprintf_s( msg, L"[WebcamCapture] ReadSample exit: hr=0x%08X flags=0x%X frames=%d\n",
+            OutputDebug( L"[WebcamCapture] ReadSample exit: hr=0x%08X flags=0x%X frames=%d\n",
                          static_cast<unsigned>( hr ), flags, frameCount );
-            OutputDebugStringW( msg );
             break;
         }
 
         if( !sample )
             continue;
 
+#if _DEBUG
         LARGE_INTEGER afterRead;
         QueryPerformanceCounter( &afterRead );
         double readMs = static_cast<double>( afterRead.QuadPart - loopStart.QuadPart ) * 1000.0 / perfFreq.QuadPart;
         totalReadMs += readMs;
+#endif
 
         // Get the buffer and flatten it into a known-tight BGRA buffer.
         // Use IMF2DBuffer + MFCopyImage when available so the true source
@@ -329,7 +334,7 @@ void WebcamCapture::CaptureThread()
         }
         if( FAILED( hr ) || !buffer )
         {
-            OutputDebugStringW( L"[WebcamCapture] Failed to get sample buffer\n" );
+            OutputDebug( L"[WebcamCapture] Failed to get sample buffer\n" );
             continue;
         }
 
@@ -377,13 +382,11 @@ void WebcamCapture::CaptureThread()
                         UINT w = curLen / ( h * 4 );
                         if( w >= 160 && w <= 7680 )
                         {
-                            wchar_t msg[256];
-                            swprintf_s( msg, L"[WebcamCapture] Buffer mismatch: "
+                            OutputDebug( L"[WebcamCapture] Buffer mismatch: "
                                         L"negotiated %ux%u (%u bytes) but buffer is "
                                         L"%u bytes — using %ux%u\n",
                                         m_camWidth, m_camHeight, frameBytes,
                                         curLen, w, h );
-                            OutputDebugStringW( msg );
                             m_camWidth = w;
                             m_camHeight = h;
                             break;
@@ -407,10 +410,12 @@ void WebcamCapture::CaptureThread()
         if( !copiedFrame )
             continue;
 
+#if _DEBUG
         LARGE_INTEGER afterCopy;
         QueryPerformanceCounter( &afterCopy );
         double copyMs = static_cast<double>( afterCopy.QuadPart - afterRead.QuadPart ) * 1000.0 / perfFreq.QuadPart;
         totalCopyMs += copyMs;
+#endif
 
         // Use the current m_camWidth (which may have been corrected by
         // the buffer-mismatch safety net above).
@@ -451,15 +456,18 @@ void WebcamCapture::CaptureThread()
             {
                 std::lock_guard<std::mutex> lock( m_frameLock );
 
+#if _DEBUG
                 LARGE_INTEGER afterScale;
                 QueryPerformanceCounter( &afterScale );
                 double scaleMs = static_cast<double>( afterScale.QuadPart - afterCopy.QuadPart ) * 1000.0 / perfFreq.QuadPart;
                 totalScaleMs += scaleMs;
+#endif
 
                 m_pendingPixels.swap( m_scaledPixels );
                 m_newFrameReady = true;
                 frameCount++;
 
+#if _DEBUG
                 LARGE_INTEGER afterLock;
                 QueryPerformanceCounter( &afterLock );
                 double lockMs = static_cast<double>( afterLock.QuadPart - afterScale.QuadPart ) * 1000.0 / perfFreq.QuadPart;
@@ -470,16 +478,15 @@ void WebcamCapture::CaptureThread()
 
                 if( frameCount <= 5 || ( frameCount % 30 ) == 0 )
                 {
-                    wchar_t msg[512];
-                    swprintf_s( msg, L"[WebcamCapture] frame %d: cam=%ux%u overlay=%ux%u "
+                    OutputDebug( L"[WebcamCapture] frame %d: cam=%ux%u overlay=%ux%u "
                                 L"read=%.1fms copy=%.1fms scale=%.1fms lock=%.1fms "
                                 L"interval=%.1fms avgRead=%.1f avgCopy=%.1f avgScale=%.1f\n",
                                  frameCount, m_camWidth, m_camHeight, ovW, ovH,
                                  readMs, copyMs, scaleMs, lockMs, frameIntervalMs,
                                  totalReadMs / frameCount, totalCopyMs / frameCount,
                                  totalScaleMs / frameCount );
-                    OutputDebugStringW( msg );
                 }
+#endif
             }
 
             // Signal that the first frame is ready so Start() can unblock.
@@ -580,7 +587,9 @@ void WebcamCapture::ComputeOverlayDimensions()
 //----------------------------------------------------------------------------
 bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 {
+#if _DEBUG
     m_compositeCount++;
+#endif
 
     // If the capture thread has new pixels, upload them to the cached
     // GPU texture.  Use try_lock so we NEVER block the encoder callback.
@@ -589,7 +598,9 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     {
         if( m_newFrameReady && !m_pendingPixels.empty() && m_overlayW > 0 && m_overlayH > 0 )
         {
+#if _DEBUG
             m_uploadCount++;
+#endif
 
             // Recreate the texture if dimensions changed.
             if( m_texW != m_overlayW || m_texH != m_overlayH )
@@ -631,16 +642,18 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     }
     else
     {
+#if _DEBUG
         m_lockFailCount++;
+#endif
     }
 
+#if _DEBUG
     if( ( m_compositeCount % 30 ) == 0 )
     {
-        wchar_t msg[256];
-        swprintf_s( msg, L"[WebcamCapture] Composite: calls=%d uploads=%d lockFails=%d hasOverlay=%d\n",
+        OutputDebug( L"[WebcamCapture] Composite: calls=%d uploads=%d lockFails=%d hasOverlay=%d\n",
                      m_compositeCount, m_uploadCount, m_lockFailCount, m_hasOverlay ? 1 : 0 );
-        OutputDebugStringW( msg );
     }
+#endif
 
     if( !m_hasOverlay )
         return false;

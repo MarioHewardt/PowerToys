@@ -8,6 +8,9 @@
 //==============================================================================
 #include "pch.h"
 #include "VideoRecordingSession.h"
+
+// Defined in Zoomit.cpp; compiles to nothing in Release builds.
+void OutputDebug(const TCHAR* format, ...);
 #include "CaptureFrameWait.h"
 #include "Utility.h"
 #include <winrt/Windows.Graphics.Imaging.h>
@@ -31,6 +34,12 @@ extern TCHAR g_WebcamDeviceSymLink[MAX_PATH];
 extern class ClassRegistry reg;
 extern REG_SETTING RegSettings[];
 extern HINSTANCE g_hInstance;
+extern HWND g_hWndMain;
+
+// Must match the definition in ZoomIt.h.
+#ifndef WM_USER_RECORDING_STARTED
+#define WM_USER_RECORDING_STARTED (WM_USER + 111)
+#endif
 
 HWND hDlgTrimDialog = nullptr;
 
@@ -73,6 +82,48 @@ int32_t EnsureEven(int32_t value)
     {
         return value + 1;
     }
+}
+
+//----------------------------------------------------------------------------
+//
+// Recording startup diagnostics — active in ALL builds.
+// Logs QPC-based wall-clock timestamps so we can measure exactly where time
+// is spent during the recording startup pipeline.
+//
+//----------------------------------------------------------------------------
+static double RecDiagElapsedMs()
+{
+    static LARGE_INTEGER s_freq = {};
+    static LARGE_INTEGER s_origin = {};
+    if( s_freq.QuadPart == 0 )
+    {
+        QueryPerformanceFrequency( &s_freq );
+        QueryPerformanceCounter( &s_origin );
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter( &now );
+    return static_cast<double>( now.QuadPart - s_origin.QuadPart ) * 1000.0 / s_freq.QuadPart;
+}
+
+static void RecDiagResetOrigin()
+{
+    // Reset the origin so elapsed times start from 0 for each new recording.
+    static LARGE_INTEGER s_freq = {};
+    if( s_freq.QuadPart == 0 )
+        QueryPerformanceFrequency( &s_freq );
+    // Force re-init on next call to RecDiagElapsedMs by zeroing the freq.
+    // Instead, just call RecDiagElapsedMs to establish a new snapshot.
+}
+
+static void RecDiag( const wchar_t* fmt, ... )
+{
+    wchar_t buf[512];
+    int offset = swprintf_s( buf, L"[RecDiag +%.1fms] ", RecDiagElapsedMs() );
+    va_list va;
+    va_start( va, fmt );
+    _vsnwprintf_s( buf + offset, _countof( buf ) - offset, _TRUNCATE, fmt, va );
+    va_end( va );
+    OutputDebugStringW( buf );
 }
 
 static bool IsGifPath(const std::wstring& path)
@@ -884,6 +935,7 @@ VideoRecordingSession::VideoRecordingSession(
     bool captureSystemAudio,
     winrt::Streams::IRandomAccessStream const& stream)
 {
+    RecDiag( L"Constructor: entry\n" );
     m_device = device;
     m_d3dDevice = GetDXGIInterfaceFromObject<ID3D11Device>(m_device);
     m_d3dDevice->GetImmediateContext(m_d3dContext.put());
@@ -896,6 +948,7 @@ VideoRecordingSession::VideoRecordingSession(
     auto inputWidth = EnsureEven(itemSize.Width);
     auto inputHeight = EnsureEven(itemSize.Height);
     m_frameWait = std::make_shared<CaptureFrameWait>(m_device, m_item, winrt::SizeInt32{ inputWidth, inputHeight });
+    RecDiag( L"Constructor: CaptureFrameWait created (screen capture started)\n" );
     auto weakPointer{ std::weak_ptr{ m_frameWait } };
     m_itemClosed = item.Closed(winrt::auto_revoke, [weakPointer](auto&, auto&)
         {
@@ -955,13 +1008,12 @@ VideoRecordingSession::VideoRecordingSession(
     // initialize.  The first ReadSample takes ~850 ms for sensor warmup;
     // starting it here overlaps that cost with the setup below.
     {
-        wchar_t dbg[256];
-        swprintf_s( dbg, L"[WebcamCapture] g_WebcamOverlay=%d outputW=%d outputH=%d\n",
+        OutputDebug( L"[WebcamCapture] g_WebcamOverlay=%d outputW=%d outputH=%d\n",
                      static_cast<int>( g_WebcamOverlay ), outputWidth, outputHeight );
-        OutputDebugStringW( dbg );
     }
     if( g_WebcamOverlay )
     {
+        RecDiag( L"Constructor: creating WebcamCapture\n" );
         m_webcamCapture = std::make_unique<WebcamCapture>(
             m_d3dDevice, m_d3dContext,
             g_WebcamDeviceSymLink,
@@ -970,6 +1022,7 @@ VideoRecordingSession::VideoRecordingSession(
             static_cast<WebcamCapture::Position>( g_WebcamPosition ),
             static_cast<WebcamCapture::Size>( g_WebcamSize ) );
         m_webcamCapture->Start();
+        RecDiag( L"Constructor: WebcamCapture::Start() returned\n" );
     }
 
     // Describe out output: H264 video with an MP4 container
@@ -1017,10 +1070,12 @@ VideoRecordingSession::VideoRecordingSession(
     // pool) ensures the webcam overlay is present from the very first frame.
     if( m_webcamCapture )
     {
-        OutputDebugStringW( L"[Recording] Constructor: waiting for webcam first frame...\n" );
-        m_webcamCapture->WaitForFirstFrame( 2000 );
-        OutputDebugStringW( L"[Recording] Constructor: webcam ready\n" );
+        RecDiag( L"Constructor: waiting for webcam first frame (up to 2000ms)...\n" );
+        bool webcamReady = m_webcamCapture->WaitForFirstFrame( 2000 );
+        RecDiag( L"Constructor: WaitForFirstFrame returned %s\n",
+                 webcamReady ? L"TRUE (ready)" : L"FALSE (timeout)" );
     }
+    RecDiag( L"Constructor: exit\n" );
 }
 
 
@@ -1045,14 +1100,14 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
     auto expected = false;
     if (m_isRecording.compare_exchange_strong(expected, true))
     {
-        OutputDebugStringW( L"[Recording] StartAsync: begin\n" );
+        RecDiag( L"StartAsync: begin\n" );
 
         // Create our MediaStreamSource
         if(m_audioGenerator) {
 
-            OutputDebugStringW( L"[Recording] StartAsync: initializing audio...\n" );
+            RecDiag( L"StartAsync: co_await InitializeAsync...\n" );
             co_await m_audioGenerator->InitializeAsync();
-            OutputDebugStringW( L"[Recording] StartAsync: audio initialized\n" );
+            RecDiag( L"StartAsync: audio initialized\n" );
             m_streamSource = winrt::MediaStreamSource(m_videoDescriptor, winrt::AudioStreamDescriptor(m_audioGenerator->GetEncodingProperties()));
         }
         else {
@@ -1080,9 +1135,9 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
         winrt::PrepareTranscodeResult transcode{ nullptr };
         try
         {
-            OutputDebugStringW( L"[Recording] StartAsync: preparing transcode...\n" );
+            RecDiag( L"StartAsync: co_await PrepareMediaStreamSourceTranscodeAsync...\n" );
             transcode = co_await m_transcoder.PrepareMediaStreamSourceTranscodeAsync(m_streamSource, m_stream, m_encodingProfile);
-            OutputDebugStringW( L"[Recording] StartAsync: transcode prepared, starting...\n" );
+            RecDiag( L"StartAsync: transcode prepared, co_await TranscodeAsync...\n" );
 
             if (m_closed.load())
             {
@@ -1090,7 +1145,7 @@ winrt::IAsyncAction VideoRecordingSession::StartAsync()
             }
 
             co_await transcode.TranscodeAsync();
-            OutputDebugStringW( L"[Recording] StartAsync: transcode completed\n" );
+            RecDiag( L"StartAsync: transcode completed\n" );
         }
         catch (winrt::hresult_error const& error)
         {
@@ -1159,14 +1214,30 @@ void VideoRecordingSession::OnMediaStreamSourceStarting(
     winrt::MediaStreamSource const&,
     winrt::MediaStreamSourceStartingEventArgs const& args)
 {
+    RecDiag( L"OnStarting: entry, calling TryGetNextFrame...\n" );
     auto frame = m_frameWait->TryGetNextFrame();
     if (frame) {
+        RecDiag( L"OnStarting: got frame, SystemRelativeTime=%lld (%.1fms)\n",
+                 frame->SystemRelativeTime.count(),
+                 frame->SystemRelativeTime.count() / 10000.0 );
         args.Request().SetActualStartPosition(frame->SystemRelativeTime);
+
+        // Cache this frame so it can be served as the very first video
+        // sample in OnMediaStreamSourceSampleRequested.  Without this,
+        // the frame is discarded and the first encoded sample comes from
+        // the *next* capture, creating a visible timestamp gap.
+        m_cachedStartingFrame = frame;
+
         if (m_audioGenerator) {
 
+            RecDiag( L"OnStarting: calling AudioSampleGenerator::Start()\n" );
             m_audioGenerator->Start();
+            RecDiag( L"OnStarting: audio started\n" );
         }
+    } else {
+        RecDiag( L"OnStarting: TryGetNextFrame returned nullopt!\n" );
     }
+    RecDiag( L"OnStarting: exit\n" );
 }
 
 //----------------------------------------------------------------------------
@@ -1195,20 +1266,46 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
     winrt::MediaStreamSource const&,
     winrt::MediaStreamSourceSampleRequestedEventArgs const& args)
 {
+    static int s_diagVideoCount = 0;
+    static int s_diagAudioCount = 0;
+    static int64_t s_diagStartTs = 0;  // SystemRelativeTime from OnStarting
+
     auto request = args.Request();
     auto streamDescriptor = request.StreamDescriptor();
     if (auto videoStreamDescriptor = streamDescriptor.try_as<winrt::VideoStreamDescriptor>())
     {
-        if (auto frame = m_frameWait->TryGetNextFrame())
+        // If OnStarting cached a frame, serve it as the first sample
+        // so there is no timestamp gap at the start of the recording.
+        auto cachedFrame = std::exchange( m_cachedStartingFrame, std::nullopt );
+        auto frame = cachedFrame ? cachedFrame : m_frameWait->TryGetNextFrame();
+        if (frame)
         {
             try
             {
                 auto timeStamp = frame->SystemRelativeTime;
+
+                // Log first 10 video frames with timing.
+                if( !m_hasVideoSample.load() )
+                {
+                    s_diagVideoCount = 0;
+                    s_diagAudioCount = 0;
+                    s_diagStartTs = timeStamp.count();
+                }
+                s_diagVideoCount++;
+                if( s_diagVideoCount <= 10 )
+                {
+                    RecDiag( L"SampleReq VIDEO #%d: sysRelTime=%lld deltaFromStart=%.1fms\n",
+                             s_diagVideoCount,
+                             timeStamp.count(),
+                             ( timeStamp.count() - s_diagStartTs ) / 10000.0 );
+                }
+
                 auto contentSize = frame->ContentSize;
                 auto frameTexture = GetDXGIInterfaceFromObject<ID3D11Texture2D>(frame->FrameTexture);
                 D3D11_TEXTURE2D_DESC desc = {};
                 frameTexture->GetDesc(&desc);
 
+#if _DEBUG
                 static int dbgFrameNum = 0;
                 static LARGE_INTEGER dbgFreq = {}, dbgLastFrame = {};
                 // Reset counters on first frame of a new recording session.
@@ -1228,15 +1325,14 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
 
                 if( dbgFrameNum <= 10 )
                 {
-                    wchar_t msg[256];
-                    swprintf_s( msg, L"[VideoRec] Frame %d: ts=%lld content=%dx%d tex=%ux%u webcam=%d\n",
+                    OutputDebug( L"[VideoRec] Frame %d: ts=%lld content=%dx%d tex=%ux%u webcam=%d\n",
                                  dbgFrameNum,
                                  timeStamp.count(),
                                  contentSize.Width, contentSize.Height,
                                  desc.Width, desc.Height,
                                  m_webcamCapture ? 1 : 0 );
-                    OutputDebugStringW( msg );
                 }
+#endif
 
                 winrt::com_ptr<ID3D11Texture2D> backBuffer;
                 winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
@@ -1272,7 +1368,9 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                     0,
                     &region);
 
+#if _DEBUG
                 QueryPerformanceCounter( &tAfterCrop );
+#endif
 
                 // Composite webcam overlay onto the back buffer BEFORE it
                 // gets copied to the encoder's sample texture.
@@ -1281,7 +1379,9 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                     m_webcamCapture->CompositeOnto( backBuffer.get() );
                 }
 
+#if _DEBUG
                 QueryPerformanceCounter( &tAfterWebcam );
+#endif
 
                 desc = {};
                 backBuffer->GetDesc(&desc);
@@ -1294,7 +1394,9 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 winrt::check_hresult(m_d3dDevice->CreateTexture2D(&desc, nullptr, sampleTexture.put()));
                 m_d3dContext->CopyResource(sampleTexture.get(), backBuffer.get());
 
+#if _DEBUG
                 QueryPerformanceCounter( &tAfterCreate );
+#endif
 
                 auto dxgiSurface = sampleTexture.as<IDXGISurface>();
                 auto sampleSurface = CreateDirect3DSurface(dxgiSurface.get());
@@ -1303,8 +1405,16 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
                 winrt::check_hresult(m_previewSwapChain->Present1(0, 0, &presentParameters));
 
                 auto sample = winrt::MediaStreamSample::CreateFromDirect3D11Surface(sampleSurface, timeStamp);
-                m_hasVideoSample.store(true);
+                if( !m_hasVideoSample.exchange( true ) )
+                {
+                    // Notify the UI that the first video frame has been
+                    // captured so it can show a "recording started" indicator.
+                    RecDiag( L"Posting WM_USER_RECORDING_STARTED to g_hWndMain=%p\n",
+                             static_cast<void*>( g_hWndMain ) );
+                    PostMessage( g_hWndMain, WM_USER_RECORDING_STARTED, 0, 0 );
+                }
 
+#if _DEBUG
                 QueryPerformanceCounter( &tAfterPresent );
                 double intervalMs = static_cast<double>( tStart.QuadPart - dbgLastFrame.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
                 double cropMs = static_cast<double>( tAfterCrop.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
@@ -1316,13 +1426,12 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
 
                 if( dbgFrameNum <= 10 || ( dbgFrameNum % 30 ) == 0 )
                 {
-                    wchar_t msg[512];
-                    swprintf_s( msg, L"[VideoRec] frame %d: interval=%.1fms crop=%.1fms webcam=%.1fms "
+                    OutputDebug( L"[VideoRec] frame %d: interval=%.1fms crop=%.1fms webcam=%.1fms "
                                 L"create+copy=%.1fms present=%.1fms total=%.1fms tex=%ux%u\n",
                                  dbgFrameNum, intervalMs, cropMs, webcamMs, createMs, presentMs, totalMs,
                                  desc.Width, desc.Height );
-                    OutputDebugStringW( msg );
                 }
+#endif
 
                 request.Sample(sample);
             }
@@ -1346,6 +1455,14 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
         {
             if (auto sample = m_audioGenerator->TryGetNextSample())
             {
+                s_diagAudioCount++;
+                if( s_diagAudioCount <= 10 )
+                {
+                    RecDiag( L"SampleReq AUDIO #%d: timestamp=%lld (%.1fms)\n",
+                             s_diagAudioCount,
+                             sample.value().Timestamp().count(),
+                             sample.value().Timestamp().count() / 10000.0 );
+                }
                 request.Sample(sample.value());
             }
             else

@@ -231,4 +231,9 @@ private:
 
     // Set once the MediaStreamSource successfully returns at least one video sample.
     std::atomic<bool> m_hasVideoSample = false;
+
+    // Frame captured during OnMediaStreamSourceStarting that would otherwise
+    // be discarded.  By serving it as the very first video sample we eliminate
+    // the timestamp gap between the start position and the first encoded frame.
+    std::optional<CaptureFrame> m_cachedStartingFrame;
 };

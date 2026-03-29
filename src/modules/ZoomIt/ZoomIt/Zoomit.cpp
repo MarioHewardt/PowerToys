@@ -6616,6 +6616,21 @@ auto GetUniqueScreenshotFilename()
 //----------------------------------------------------------------------------
 winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndRecord ) try
 {
+    // ---- Recording startup timing diagnostics ----
+    LARGE_INTEGER _diagFreq, _diagT0, _diagT1;
+    QueryPerformanceFrequency( &_diagFreq );
+    QueryPerformanceCounter( &_diagT0 );
+    auto _diagMs = [&]() -> double {
+        QueryPerformanceCounter( &_diagT1 );
+        return static_cast<double>( _diagT1.QuadPart - _diagT0.QuadPart ) * 1000.0 / _diagFreq.QuadPart;
+    };
+    auto _diagLog = [&]( const wchar_t* label ) {
+        wchar_t buf[256];
+        swprintf_s( buf, L"[RecStartup +%.1fms] %s\n", _diagMs(), label );
+        OutputDebugStringW( buf );
+    };
+    _diagLog( L"entry" );
+
     // Capture the UI thread context so we can resume on it for the save dialog
     winrt::apartment_context uiThread;
 
@@ -6626,11 +6641,13 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
     // Choose temp file extension based on format
     const wchar_t* tempFileName = (g_RecordingFormat == RecordingFormat::GIF) ? L"zoomit.gif" : L"zoomit.mp4";
     auto file = co_await appFolder.CreateFileAsync( tempFileName, winrt::CreationCollisionOption::ReplaceExisting );
+    _diagLog( L"temp file created" );
 
     // Get the device
     auto d3dDevice = util::CreateD3D11Device();
     auto dxgiDevice = d3dDevice.as<IDXGIDevice>();
     g_RecordDevice = CreateDirect3DDevice( dxgiDevice.get() );
+    _diagLog( L"D3D device created" );
 
     // Get the active MONITOR capture device
     HMONITOR hMon = NULL;
@@ -6646,8 +6663,10 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
         item = util::CreateCaptureItemForWindow( hWndRecord );
     else
         item = util::CreateCaptureItemForMonitor( hMon );
+    _diagLog( L"capture item created" );
 
     auto stream = co_await file.OpenAsync( winrt::FileAccessMode::ReadWrite );
+    _diagLog( L"file stream opened" );
 
     // Create the appropriate recording session based on format
     OutputDebugStringW((L"Starting recording session. Framerate:  " + std::to_wstring(g_RecordFrameRate) + L" scaling: " + std::to_wstring(g_RecordScaling) + L" Format: " + (g_RecordingFormat == RecordingFormat::GIF ? L"GIF" : L"MP4") + L"\n").c_str());
@@ -6697,6 +6716,7 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
     }
     else
     {
+        _diagLog( L"calling VideoRecordingSession::Create (constructor)" );
         g_RecordingSession = VideoRecordingSession::Create(
                                         g_RecordDevice,
                                         item,
@@ -6705,6 +6725,7 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
                                         g_CaptureAudio,
                                         g_CaptureSystemAudio,
                                         stream );
+        _diagLog( L"VideoRecordingSession::Create returned" );
 
         recordingStarted = (g_RecordingSession != nullptr);
 
@@ -6715,7 +6736,9 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
         {
             try
             {
+                _diagLog( L"calling co_await StartAsync()" );
                 co_await g_RecordingSession->StartAsync();
+                _diagLog( L"StartAsync returned" );
             }
             catch (const winrt::hresult_error& error)
             {
@@ -8073,6 +8096,28 @@ LRESULT APIENTRY MainWndProc(
                     if( hWndRecord == GetDesktopWindow()) {
 
                         hWndRecord = NULL;
+                    }
+                }
+
+                // Show a full-monitor recording border (yellow → orange once
+                // the first frame is captured) so the user knows something is
+                // happening, even for full-screen / window captures.
+                // Only create the border when starting a NEW recording
+                // (g_RecordToggle==FALSE).  On the second hotkey press (stop),
+                // skip this — StopRecording() will tear down the border.
+                if( g_RecordToggle == FALSE )
+                {
+                    OutputDebugStringW( L"[RecBorder] About to call SelectRectangle::Start(fullMonitor=true)\n" );
+                    try
+                    {
+                        // Pass NULL as owner — the main window may be hidden,
+                        // and owned popups of hidden owners are hidden too.
+                        g_SelectRectangle.Start( nullptr, true );
+                        OutputDebugStringW( L"[RecBorder] SelectRectangle::Start returned OK\n" );
+                    }
+                    catch( ... )
+                    {
+                        OutputDebugStringW( L"[RecBorder] SelectRectangle::Start THREW an exception!\n" );
                     }
                 }
             }
@@ -9769,6 +9814,19 @@ LRESULT APIENTRY MainWndProc(
 
     case WM_USER_STOP_RECORDING:
         StopRecording();
+        break;
+
+    case WM_USER_RECORDING_STARTED:
+        // The first video frame has been captured.  Change the selection
+        // border from yellow to orange so the user knows recording is live.
+        OutputDebugStringW( L"[RecBorder] WM_USER_RECORDING_STARTED received\n" );
+        {
+            wchar_t dbg[256];
+            swprintf_s( dbg, L"[RecBorder] m_window=%p m_selected=%d\n",
+                        g_SelectRectangle.Window(), g_SelectRectangle.IsSelected() );
+            OutputDebugStringW( dbg );
+        }
+        g_SelectRectangle.SetRecordingActive();
         break;
 
     case WM_USER_SAVE_CURSOR:
