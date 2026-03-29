@@ -1039,6 +1039,9 @@ VideoRecordingSession::VideoRecordingSession(
     video.PixelAspectRatio().Denominator(1);
     m_encodingProfile.Video(video);
 
+    // Store frame interval for timeout-based frame production when webcam is active.
+    m_frameIntervalTicks = ( frameRate > 0 ) ? ( 10'000'000LL / frameRate ) : 333'333LL;
+
     // Always set up audio profile for loopback capture (stereo AAC)
     auto audio = m_encodingProfile.Audio();
     audio = winrt::AudioEncodingProperties::CreateAac(48000, 2, 192000);
@@ -1175,6 +1178,9 @@ void VideoRecordingSession::Close()
         m_webcamCapture.reset();
     }
 
+    // Release cached desktop texture.
+    m_cachedDesktopTex = nullptr;
+
     auto expected = false;
     if (m_closed.compare_exchange_strong(expected, true))
     {
@@ -1277,81 +1283,78 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
         // If OnStarting cached a frame, serve it as the first sample
         // so there is no timestamp gap at the start of the recording.
         auto cachedFrame = std::exchange( m_cachedStartingFrame, std::nullopt );
-        auto frame = cachedFrame ? cachedFrame : m_frameWait->TryGetNextFrame();
-        if (frame)
+
+        // When a webcam overlay is active, use a timeout so we keep
+        // producing video frames (with fresh webcam composites) even
+        // when the desktop is static.  Without this, TryGetNextFrame
+        // blocks forever on a static desktop and the webcam freezes.
+        const bool useTimeout = ( m_webcamCapture != nullptr ) && !cachedFrame;
+        const DWORD timeoutMs = useTimeout
+            ? static_cast<DWORD>( m_frameIntervalTicks / 10'000 )  // ticks → ms
+            : INFINITE;
+
+        auto frame = cachedFrame
+            ? cachedFrame
+            : ( useTimeout
+                ? m_frameWait->TryGetNextFrame( timeoutMs )
+                : m_frameWait->TryGetNextFrame() );
+
+        // frame is nullopt either on timeout (static desktop) or end-of-capture.
+        // On timeout with a cached desktop texture, produce a repeat frame.
+        const bool isRepeatFrame = !frame && useTimeout && m_cachedDesktopTex;
+
+        if( !frame && !isRepeatFrame )
         {
-            try
+            // True end-of-capture — no cached desktop to reuse.
+            request.Sample( nullptr );
+            CloseInternal();
+            return;
+        }
+
+        try
+        {
+            winrt::com_ptr<ID3D11Texture2D> backBuffer;
+            winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
+
+            if( !m_cachedRTV )
             {
-                auto timeStamp = frame->SystemRelativeTime;
+                winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, m_cachedRTV.put()));
+            }
 
-                // Log first 10 video frames with timing.
-                if( !m_hasVideoSample.load() )
-                {
-                    s_diagVideoCount = 0;
-                    s_diagAudioCount = 0;
-                    s_diagStartTs = timeStamp.count();
-                }
-                s_diagVideoCount++;
-                if( s_diagVideoCount <= 10 )
-                {
-                    RecDiag( L"SampleReq VIDEO #%d: sysRelTime=%lld deltaFromStart=%.1fms\n",
-                             s_diagVideoCount,
-                             timeStamp.count(),
-                             ( timeStamp.count() - s_diagStartTs ) / 10000.0 );
-                }
+            winrt::TimeSpan timeStamp{ 0 };
 
+            if( isRepeatFrame )
+            {
+                // Desktop hasn't changed — copy cached desktop content
+                // to the back buffer.  Compute the timestamp from
+                // wall-clock elapsed time so it stays aligned with the
+                // audio stream's real-time clock.
+                m_d3dContext->CopyResource( backBuffer.get(), m_cachedDesktopTex.get() );
+
+                LARGE_INTEGER now;
+                QueryPerformanceCounter( &now );
+                // Elapsed wall-clock time in 100ns ticks since the first frame.
+                int64_t elapsedTicks = static_cast<int64_t>(
+                    static_cast<double>( now.QuadPart - m_qpcRecordingStart.QuadPart )
+                    * 10'000'000.0 / m_qpcFreq.QuadPart );
+                timeStamp = winrt::TimeSpan{ m_startSystemRelativeTime + elapsedTicks };
+
+                // Ensure monotonically increasing timestamps.
+                if( timeStamp.count() <= m_lastVideoTimestamp.count() )
+                    timeStamp = winrt::TimeSpan{ m_lastVideoTimestamp.count() + 1 };
+            }
+            else
+            {
+                // New desktop frame — crop and copy to back buffer.
+                timeStamp = frame->SystemRelativeTime;
                 auto contentSize = frame->ContentSize;
                 auto frameTexture = GetDXGIInterfaceFromObject<ID3D11Texture2D>(frame->FrameTexture);
                 D3D11_TEXTURE2D_DESC desc = {};
                 frameTexture->GetDesc(&desc);
 
-#if _DEBUG
-                static int dbgFrameNum = 0;
-                static LARGE_INTEGER dbgFreq = {}, dbgLastFrame = {};
-                // Reset counters on first frame of a new recording session.
-                if( !m_hasVideoSample.load() )
-                {
-                    dbgFrameNum = 0;
-                    dbgFreq.QuadPart = 0;
-                }
-                dbgFrameNum++;
-                if( dbgFreq.QuadPart == 0 )
-                {
-                    QueryPerformanceFrequency( &dbgFreq );
-                    QueryPerformanceCounter( &dbgLastFrame );
-                }
-                LARGE_INTEGER tStart, tAfterCrop, tAfterWebcam, tAfterCreate, tAfterPresent;
-                QueryPerformanceCounter( &tStart );
-
-                if( dbgFrameNum <= 10 )
-                {
-                    OutputDebug( L"[VideoRec] Frame %d: ts=%lld content=%dx%d tex=%ux%u webcam=%d\n",
-                                 dbgFrameNum,
-                                 timeStamp.count(),
-                                 contentSize.Width, contentSize.Height,
-                                 desc.Width, desc.Height,
-                                 m_webcamCapture ? 1 : 0 );
-                }
-#endif
-
-                winrt::com_ptr<ID3D11Texture2D> backBuffer;
-                winrt::check_hresult(m_previewSwapChain->GetBuffer(0, winrt::guid_of<ID3D11Texture2D>(), backBuffer.put_void()));
-
-                // Reuse the render target view — the swap chain back buffer
-                // pointer is stable between Present calls.
-                if( !m_cachedRTV )
-                {
-                    winrt::check_hresult(m_d3dDevice->CreateRenderTargetView(backBuffer.get(), nullptr, m_cachedRTV.put()));
-                }
-
-                // Use the smaller of the crop size or content size. The content
-                // size can change while recording, for example by resizing the
-                // window. This ensures that only valid content is copied.
                 auto width = min(m_rcCrop.right - m_rcCrop.left, contentSize.Width);
                 auto height = min(m_rcCrop.bottom - m_rcCrop.top, contentSize.Height);
 
-                // Set the content region to copy and clamp the coordinates to the
-                // texture surface.
                 D3D11_BOX region = {};
                 region.left = std::clamp(m_rcCrop.left, static_cast<LONG>(0), static_cast<LONG>(desc.Width));
                 region.right = std::clamp(m_rcCrop.left + width, static_cast<LONG>(0), static_cast<LONG>(desc.Width));
@@ -1361,92 +1364,121 @@ void VideoRecordingSession::OnMediaStreamSourceSampleRequested(
 
                 m_d3dContext->ClearRenderTargetView(m_cachedRTV.get(), CLEAR_COLOR);
                 m_d3dContext->CopySubresourceRegion(
-                    backBuffer.get(),
-                    0,
-                    0, 0, 0,
-                    frameTexture.get(),
-                    0,
-                    &region);
+                    backBuffer.get(), 0, 0, 0, 0,
+                    frameTexture.get(), 0, &region);
 
-#if _DEBUG
-                QueryPerformanceCounter( &tAfterCrop );
-#endif
-
-                // Composite webcam overlay onto the back buffer BEFORE it
-                // gets copied to the encoder's sample texture.
-                if( m_webcamCapture )
+                // Cache a standalone copy of the cropped desktop content.
+                // This texture is NOT in the frame pool — it's ours to keep.
+                D3D11_TEXTURE2D_DESC bbDesc = {};
+                backBuffer->GetDesc( &bbDesc );
+                if( !m_cachedDesktopTex )
                 {
-                    m_webcamCapture->CompositeOnto( backBuffer.get() );
+                    bbDesc.Usage = D3D11_USAGE_DEFAULT;
+                    bbDesc.BindFlags = 0;
+                    bbDesc.CPUAccessFlags = 0;
+                    bbDesc.MiscFlags = 0;
+                    winrt::check_hresult( m_d3dDevice->CreateTexture2D( &bbDesc, nullptr, m_cachedDesktopTex.put() ) );
                 }
-
-#if _DEBUG
-                QueryPerformanceCounter( &tAfterWebcam );
-#endif
-
-                desc = {};
-                backBuffer->GetDesc(&desc);
-
-                desc.Usage = D3D11_USAGE_DEFAULT;
-                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-                desc.CPUAccessFlags = 0;
-                desc.MiscFlags = 0;
-                winrt::com_ptr<ID3D11Texture2D> sampleTexture;
-                winrt::check_hresult(m_d3dDevice->CreateTexture2D(&desc, nullptr, sampleTexture.put()));
-                m_d3dContext->CopyResource(sampleTexture.get(), backBuffer.get());
-
-#if _DEBUG
-                QueryPerformanceCounter( &tAfterCreate );
-#endif
-
-                auto dxgiSurface = sampleTexture.as<IDXGISurface>();
-                auto sampleSurface = CreateDirect3DSurface(dxgiSurface.get());
-
-                DXGI_PRESENT_PARAMETERS presentParameters{};
-                winrt::check_hresult(m_previewSwapChain->Present1(0, 0, &presentParameters));
-
-                auto sample = winrt::MediaStreamSample::CreateFromDirect3D11Surface(sampleSurface, timeStamp);
-                if( !m_hasVideoSample.exchange( true ) )
-                {
-                    // Notify the UI that the first video frame has been
-                    // captured so it can show a "recording started" indicator.
-                    RecDiag( L"Posting WM_USER_RECORDING_STARTED to g_hWndMain=%p\n",
-                             static_cast<void*>( g_hWndMain ) );
-                    PostMessage( g_hWndMain, WM_USER_RECORDING_STARTED, 0, 0 );
-                }
-
-#if _DEBUG
-                QueryPerformanceCounter( &tAfterPresent );
-                double intervalMs = static_cast<double>( tStart.QuadPart - dbgLastFrame.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                double cropMs = static_cast<double>( tAfterCrop.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                double webcamMs = static_cast<double>( tAfterWebcam.QuadPart - tAfterCrop.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                double createMs = static_cast<double>( tAfterCreate.QuadPart - tAfterWebcam.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                double presentMs = static_cast<double>( tAfterPresent.QuadPart - tAfterCreate.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                double totalMs = static_cast<double>( tAfterPresent.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
-                dbgLastFrame = tStart;
-
-                if( dbgFrameNum <= 10 || ( dbgFrameNum % 30 ) == 0 )
-                {
-                    OutputDebug( L"[VideoRec] frame %d: interval=%.1fms crop=%.1fms webcam=%.1fms "
-                                L"create+copy=%.1fms present=%.1fms total=%.1fms tex=%ux%u\n",
-                                 dbgFrameNum, intervalMs, cropMs, webcamMs, createMs, presentMs, totalMs,
-                                 desc.Width, desc.Height );
-                }
-#endif
-
-                request.Sample(sample);
+                m_d3dContext->CopyResource( m_cachedDesktopTex.get(), backBuffer.get() );
             }
-            catch (winrt::hresult_error const& error)
+
+            // Log first 10 video frames with timing.
+            if( !m_hasVideoSample.load() )
             {
-                OutputDebugStringW(error.message().c_str());
-                request.Sample(nullptr);
-                CloseInternal();
-                return;
+                s_diagVideoCount = 0;
+                s_diagAudioCount = 0;
+                s_diagStartTs = timeStamp.count();
+
+                // Establish the wall-clock reference for repeat-frame timestamps.
+                QueryPerformanceFrequency( &m_qpcFreq );
+                QueryPerformanceCounter( &m_qpcRecordingStart );
+                m_startSystemRelativeTime = timeStamp.count();
+                m_hasQpcOrigin = true;
             }
+            s_diagVideoCount++;
+            if( s_diagVideoCount <= 10 )
+            {
+                RecDiag( L"SampleReq VIDEO #%d: sysRelTime=%lld deltaFromStart=%.1fms repeat=%d\n",
+                         s_diagVideoCount,
+                         timeStamp.count(),
+                         ( timeStamp.count() - s_diagStartTs ) / 10000.0,
+                         isRepeatFrame ? 1 : 0 );
+            }
+
+#if _DEBUG
+            static int dbgFrameNum = 0;
+            static LARGE_INTEGER dbgFreq = {}, dbgLastFrame = {};
+            if( !m_hasVideoSample.load() )
+            {
+                dbgFrameNum = 0;
+                dbgFreq.QuadPart = 0;
+            }
+            dbgFrameNum++;
+            if( dbgFreq.QuadPart == 0 )
+            {
+                QueryPerformanceFrequency( &dbgFreq );
+                QueryPerformanceCounter( &dbgLastFrame );
+            }
+            LARGE_INTEGER tStart;
+            QueryPerformanceCounter( &tStart );
+#endif
+
+            // Composite webcam overlay onto the back buffer.
+            if( m_webcamCapture )
+            {
+                m_webcamCapture->CompositeOnto( backBuffer.get() );
+            }
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            backBuffer->GetDesc(&desc);
+
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            desc.CPUAccessFlags = 0;
+            desc.MiscFlags = 0;
+            winrt::com_ptr<ID3D11Texture2D> sampleTexture;
+            winrt::check_hresult(m_d3dDevice->CreateTexture2D(&desc, nullptr, sampleTexture.put()));
+            m_d3dContext->CopyResource(sampleTexture.get(), backBuffer.get());
+
+            auto dxgiSurface = sampleTexture.as<IDXGISurface>();
+            auto sampleSurface = CreateDirect3DSurface(dxgiSurface.get());
+
+            DXGI_PRESENT_PARAMETERS presentParameters{};
+            winrt::check_hresult(m_previewSwapChain->Present1(0, 0, &presentParameters));
+
+            auto sample = winrt::MediaStreamSample::CreateFromDirect3D11Surface(sampleSurface, timeStamp);
+            m_lastVideoTimestamp = timeStamp;
+
+            if( !m_hasVideoSample.exchange( true ) )
+            {
+                RecDiag( L"Posting WM_USER_RECORDING_STARTED to g_hWndMain=%p\n",
+                         static_cast<void*>( g_hWndMain ) );
+                PostMessage( g_hWndMain, WM_USER_RECORDING_STARTED, 0, 0 );
+            }
+
+#if _DEBUG
+            LARGE_INTEGER tEnd;
+            QueryPerformanceCounter( &tEnd );
+            double intervalMs = static_cast<double>( tStart.QuadPart - dbgLastFrame.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+            double totalMs = static_cast<double>( tEnd.QuadPart - tStart.QuadPart ) * 1000.0 / dbgFreq.QuadPart;
+            dbgLastFrame = tStart;
+
+            if( dbgFrameNum <= 10 || ( dbgFrameNum % 30 ) == 0 )
+            {
+                OutputDebug( L"[VideoRec] frame %d: interval=%.1fms total=%.1fms repeat=%d tex=%ux%u\n",
+                             dbgFrameNum, intervalMs, totalMs, isRepeatFrame ? 1 : 0,
+                             desc.Width, desc.Height );
+            }
+#endif
+
+            request.Sample(sample);
         }
-        else
+        catch (winrt::hresult_error const& error)
         {
+            OutputDebugStringW(error.message().c_str());
             request.Sample(nullptr);
             CloseInternal();
+            return;
         }
     }
     else if (auto audioStreamDescriptor = streamDescriptor.try_as<winrt::AudioStreamDescriptor>())

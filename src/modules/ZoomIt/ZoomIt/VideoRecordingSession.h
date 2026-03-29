@@ -236,4 +236,20 @@ private:
     // be discarded.  By serving it as the very first video sample we eliminate
     // the timestamp gap between the start position and the first encoded frame.
     std::optional<CaptureFrame> m_cachedStartingFrame;
+
+    // When a webcam overlay is active we must produce video frames even when
+    // the desktop is static.  m_cachedDesktopTex holds a standalone GPU copy
+    // of the last cropped desktop content so we can composite a fresh webcam
+    // frame onto it without needing a new capture-pool surface.
+    winrt::com_ptr<ID3D11Texture2D> m_cachedDesktopTex;
+    winrt::TimeSpan m_lastVideoTimestamp{ 0 };
+    int64_t m_frameIntervalTicks = 0;   // 10 000 000 / fps
+
+    // Wall-clock reference for synthesising repeat-frame timestamps.
+    // Using QPC keeps repeat-frame timestamps aligned with audio's
+    // real-time clock, preventing A/V drift on static desktops.
+    LARGE_INTEGER m_qpcFreq{};
+    LARGE_INTEGER m_qpcRecordingStart{};    // QPC at first sample
+    int64_t m_startSystemRelativeTime = 0; // SystemRelativeTime of first frame
+    bool m_hasQpcOrigin = false;
 };
