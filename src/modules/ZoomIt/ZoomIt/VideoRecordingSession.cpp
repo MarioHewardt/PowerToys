@@ -2475,26 +2475,47 @@ static void DrawTimeline(HDC hdc, RECT rc, VideoRecordingSession::TrimDialogData
             const double ratio = static_cast<double>(boundary.time.count()) / static_cast<double>(pData->videoDuration.count());
             const int bx = trackLeft + static_cast<int>(std::round(ratio * trackWidth2));
 
-            // Draw a dashed vertical line at the boundary
-            const int dashLen = ScaleForDpi(3, dpi);
-            const int gapLen = ScaleForDpi(2, dpi);
-            COLORREF boundaryColor;
-            if (boundary.transition == VideoRecordingSession::AppendTransition::FadeToBlack)
-                boundaryColor = darkMode ? RGB(200, 160, 60) : RGB(180, 140, 40);
-            else if (boundary.transition == VideoRecordingSession::AppendTransition::FadeToWhite)
-                boundaryColor = darkMode ? RGB(220, 220, 100) : RGB(200, 200, 60);
-            else
-                boundaryColor = darkMode ? RGB(200, 120, 60) : RGB(180, 100, 40);
-
-            HPEN hBoundaryPen = CreatePen(PS_SOLID, ScaleForDpi(2, dpi), boundaryColor);
-            HPEN hOldBoundaryPen = static_cast<HPEN>(SelectObject(hdcMem, hBoundaryPen));
-            for (int y = trackTop; y < trackBottom; y += dashLen + gapLen)
+            if (boundary.transition == VideoRecordingSession::AppendTransition::None)
             {
-                MoveToEx(hdcMem, bx, y, nullptr);
-                LineTo(hdcMem, bx, (std::min)(y + dashLen, static_cast<int>(trackBottom)));
+                // Hard transition: solid black vertical line
+                HPEN hBoundaryPen = CreatePen(PS_SOLID, ScaleForDpi(2, dpi), RGB(0, 0, 0));
+                HPEN hOldBoundaryPen = static_cast<HPEN>(SelectObject(hdcMem, hBoundaryPen));
+                MoveToEx(hdcMem, bx, trackTop, nullptr);
+                LineTo(hdcMem, bx, trackBottom);
+                SelectObject(hdcMem, hOldBoundaryPen);
+                DeleteObject(hBoundaryPen);
             }
-            SelectObject(hdcMem, hOldBoundaryPen);
-            DeleteObject(hBoundaryPen);
+            else
+            {
+                // Fade transition: draw a filled segment spanning the transition region.
+                // The pre-rendered fade clip is 1.0s total (0.5s fade-out + 0.5s fade-in),
+                // centered at the boundary time.
+                constexpr int64_t kFadeDurationTicks = 5000000LL; // 0.5s per direction
+                const double fadeStartRatio = static_cast<double>(boundary.time.count() - kFadeDurationTicks)
+                                              / static_cast<double>(pData->videoDuration.count());
+                const double fadeEndRatio   = static_cast<double>(boundary.time.count() + kFadeDurationTicks)
+                                              / static_cast<double>(pData->videoDuration.count());
+                int fadeLeft  = trackLeft + static_cast<int>(std::round(std::clamp(fadeStartRatio, 0.0, 1.0) * trackWidth2));
+                int fadeRight = trackLeft + static_cast<int>(std::round(std::clamp(fadeEndRatio,   0.0, 1.0) * trackWidth2));
+                // Ensure at least a few pixels wide so the segment is visible.
+                if (fadeRight - fadeLeft < ScaleForDpi(6, dpi))
+                {
+                    int mid = (fadeLeft + fadeRight) / 2;
+                    fadeLeft  = mid - ScaleForDpi(3, dpi);
+                    fadeRight = mid + ScaleForDpi(3, dpi);
+                }
+
+                COLORREF segColor;
+                if (boundary.transition == VideoRecordingSession::AppendTransition::FadeToBlack)
+                    segColor = darkMode ? RGB(60, 60, 65) : RGB(50, 50, 55);
+                else // FadeToWhite
+                    segColor = darkMode ? RGB(180, 180, 185) : RGB(200, 200, 205);
+
+                HBRUSH hSegBrush = CreateSolidBrush(segColor);
+                RECT segRect = { fadeLeft, trackTop, fadeRight, trackBottom };
+                FillRect(hdcMem, &segRect, hSegBrush);
+                DeleteObject(hSegBrush);
+            }
         }
     }
 
@@ -4335,6 +4356,9 @@ static winrt::MediaClip RenderFadeTransitionClip(
     miniComp.OverlayLayers().Append( layer );
 
     // Render the mini composition to a temp file.
+    // All WinRT async calls are dispatched to a background thread to avoid
+    // blocking the STA/UI thread (which would trigger !is_sta_thread asserts
+    // and deadlocks).
     auto tempPath = std::filesystem::temp_directory_path() / L"ZoomIt";
     std::filesystem::create_directories( tempPath );
 
@@ -4347,26 +4371,58 @@ static winrt::MediaClip RenderFadeTransitionClip(
     std::error_code ec;
     std::filesystem::remove( fullPath, ec );
 
-    auto folder = winrt::StorageFolder::GetFolderFromPathAsync( tempPath.wstring() ).get();
-    auto outFile = folder.CreateFileAsync( filename,
-        winrt::CreationCollisionOption::ReplaceExisting ).get();
+    // Run the async WinRT calls on a background thread.
+    winrt::MediaClip fadeClip{ nullptr };
+    wil::unique_event done( wil::EventOptions::ManualReset );
+    auto capturedTempPath = tempPath.wstring();
 
-    auto profile = winrt::MediaEncodingProfile::CreateMp4(
-        winrt::VideoEncodingQuality::HD1080p );
-    profile.Video().Width( width );
-    profile.Video().Height( height );
-
-    auto result = miniComp.RenderToFileAsync( outFile,
-        winrt::MediaTrimmingPreference::Precise, profile ).get();
-
-    if( result != winrt::TranscodeFailureReason::None )
+    std::thread worker( [&]()
     {
-        OutputDebugStringW( L"[FadeTransition] RenderToFileAsync failed\n" );
-        return nullptr;
-    }
+        winrt::init_apartment( winrt::apartment_type::multi_threaded );
+        try
+        {
+            auto folder = winrt::StorageFolder::GetFolderFromPathAsync( capturedTempPath ).get();
+            auto outFile = folder.CreateFileAsync( filename,
+                winrt::CreationCollisionOption::ReplaceExisting ).get();
 
-    // Create a clip from the rendered file.
-    auto fadeClip = winrt::MediaClip::CreateFromFileAsync( outFile ).get();
+            auto profile = winrt::MediaEncodingProfile::CreateMp4(
+                winrt::VideoEncodingQuality::HD1080p );
+            profile.Video().Width( width );
+            profile.Video().Height( height );
+
+            auto result = miniComp.RenderToFileAsync( outFile,
+                winrt::MediaTrimmingPreference::Precise, profile ).get();
+
+            if( result == winrt::TranscodeFailureReason::None )
+            {
+                fadeClip = winrt::MediaClip::CreateFromFileAsync( outFile ).get();
+            }
+            else
+            {
+                OutputDebugStringW( L"[FadeTransition] RenderToFileAsync failed\n" );
+            }
+        }
+        catch( winrt::hresult_error const& e )
+        {
+            OutputDebugStringW( ( L"[FadeTransition] Error: " + std::wstring( e.message() ) + L"\n" ).c_str() );
+        }
+        winrt::uninit_apartment();
+        done.SetEvent();
+    } );
+
+    // Pump messages while waiting so the UI stays responsive during render.
+    while( MsgWaitForMultipleObjects( 1, done.addressof(), FALSE, INFINITE,
+                                       QS_ALLINPUT ) == WAIT_OBJECT_0 + 1 )
+    {
+        MSG msg;
+        while( PeekMessage( &msg, nullptr, 0, 0, PM_REMOVE ) )
+        {
+            TranslateMessage( &msg );
+            DispatchMessage( &msg );
+        }
+    }
+    worker.join();
+
     return fadeClip;
 }
 
@@ -5660,8 +5716,42 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                         // Record the boundary time before appending
                         auto boundaryTime = pData->composition.Duration();
 
-                        auto file = winrt::StorageFile::GetFileFromPathAsync(appendPath).get();
-                        auto clip = winrt::MediaClip::CreateFromFileAsync(file).get();
+                        // Load the file and create a clip on a background thread
+                        // to avoid !is_sta_thread() asserts from .get() on the UI thread.
+                        winrt::MediaClip clip{ nullptr };
+                        {
+                            wil::unique_event loadDone( wil::EventOptions::ManualReset );
+                            std::thread loader( [&]()
+                            {
+                                winrt::init_apartment( winrt::apartment_type::multi_threaded );
+                                try
+                                {
+                                    auto f = winrt::StorageFile::GetFileFromPathAsync( appendPath ).get();
+                                    clip = winrt::MediaClip::CreateFromFileAsync( f ).get();
+                                }
+                                catch( ... ) {}
+                                winrt::uninit_apartment();
+                                loadDone.SetEvent();
+                            } );
+                            // Pump messages while waiting.
+                            while( MsgWaitForMultipleObjects( 1, loadDone.addressof(), FALSE, INFINITE,
+                                                               QS_ALLINPUT ) == WAIT_OBJECT_0 + 1 )
+                            {
+                                MSG msg;
+                                while( PeekMessage( &msg, nullptr, 0, 0, PM_REMOVE ) )
+                                {
+                                    TranslateMessage( &msg );
+                                    DispatchMessage( &msg );
+                                }
+                            }
+                            loader.join();
+                        }
+
+                        if( !clip )
+                        {
+                            OutputDebugStringW( L"[Append] Failed to load clip\n" );
+                            return TRUE;
+                        }
 
                         if (transition != VideoRecordingSession::AppendTransition::None)
                         {
