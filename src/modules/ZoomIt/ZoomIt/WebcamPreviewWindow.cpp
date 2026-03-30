@@ -91,7 +91,7 @@ bool WebcamPreviewWindow::Create(
         return false;
 
     m_hwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         kClassName,
         L"",
         WS_POPUP,
@@ -156,17 +156,106 @@ void WebcamPreviewWindow::OnTimer()
         {
             m_pixW = w;
             m_pixH = h;
-
-            memset( &m_bmi, 0, sizeof( m_bmi ) );
-            m_bmi.bmiHeader.biSize = sizeof( BITMAPINFOHEADER );
-            m_bmi.bmiHeader.biWidth = static_cast<LONG>( w );
-            // Negative height = top-down DIB (BGRA from webcam is top-down).
-            m_bmi.bmiHeader.biHeight = -static_cast<LONG>( h );
-            m_bmi.bmiHeader.biPlanes = 1;
-            m_bmi.bmiHeader.biBitCount = 32;
-            m_bmi.bmiHeader.biCompression = BI_RGB;
         }
-        InvalidateRect( m_hwnd, nullptr, FALSE );
+
+        // Use UpdateLayeredWindow with per-pixel alpha so transparent
+        // pixels (from circle/rounded-rect masking) let the desktop
+        // show through instead of painting black.
+        if( m_pixW > 0 && m_pixH > 0 && !m_pixels.empty() )
+        {
+            RECT wndRect;
+            GetWindowRect( m_hwnd, &wndRect );
+            int clientW = wndRect.right - wndRect.left;
+            int clientH = wndRect.bottom - wndRect.top;
+
+            HDC hdcScreen = GetDC( nullptr );
+            HDC hdcMem = CreateCompatibleDC( hdcScreen );
+
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof( BITMAPINFOHEADER );
+            bmi.bmiHeader.biWidth = static_cast<LONG>( m_pixW );
+            bmi.bmiHeader.biHeight = -static_cast<LONG>( m_pixH ); // top-down
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            void* pvBits = nullptr;
+            HBITMAP hBmp = CreateDIBSection( hdcMem, &bmi, DIB_RGB_COLORS, &pvBits, nullptr, 0 );
+            if( hBmp && pvBits )
+            {
+                // Copy webcam pixels, converting to pre-multiplied alpha.
+                // UpdateLayeredWindow + AC_SRC_ALPHA requires premultiplied BGRA.
+                const UINT32* src = reinterpret_cast<const UINT32*>( m_pixels.data() );
+                UINT32* dst = static_cast<UINT32*>( pvBits );
+                const UINT totalPixels = m_pixW * m_pixH;
+                for( UINT i = 0; i < totalPixels; i++ )
+                {
+                    UINT32 px = src[i];
+                    UINT32 a = ( px >> 24 ) & 0xFF;
+                    if( a == 0xFF )
+                    {
+                        dst[i] = px;
+                    }
+                    else if( a == 0 )
+                    {
+                        dst[i] = 0;
+                    }
+                    else
+                    {
+                        UINT32 r = ( ( px >> 16 ) & 0xFF ) * a / 255;
+                        UINT32 g = ( ( px >> 8 ) & 0xFF ) * a / 255;
+                        UINT32 b = ( px & 0xFF ) * a / 255;
+                        dst[i] = ( a << 24 ) | ( r << 16 ) | ( g << 8 ) | b;
+                    }
+                }
+
+                HBITMAP hOld = static_cast<HBITMAP>( SelectObject( hdcMem, hBmp ) );
+
+                POINT ptSrc = { 0, 0 };
+                POINT ptDst = { wndRect.left, wndRect.top };
+                SIZE sizeWnd = { clientW, clientH };
+                BLENDFUNCTION blend = {};
+                blend.BlendOp = AC_SRC_OVER;
+                blend.SourceConstantAlpha = 255;
+                blend.AlphaFormat = AC_SRC_ALPHA;
+
+                // If webcam pixels differ from window size, stretch via
+                // StretchBlt into a same-size DIB first.
+                if( static_cast<UINT>( clientW ) != m_pixW ||
+                    static_cast<UINT>( clientH ) != m_pixH )
+                {
+                    HDC hdcStretch = CreateCompatibleDC( hdcScreen );
+                    BITMAPINFO bmiStretch = bmi;
+                    bmiStretch.bmiHeader.biWidth = clientW;
+                    bmiStretch.bmiHeader.biHeight = -clientH;
+                    void* pvStretch = nullptr;
+                    HBITMAP hBmpStretch = CreateDIBSection( hdcStretch, &bmiStretch,
+                                                            DIB_RGB_COLORS, &pvStretch, nullptr, 0 );
+                    if( hBmpStretch )
+                    {
+                        HBITMAP hOldStretch = static_cast<HBITMAP>( SelectObject( hdcStretch, hBmpStretch ) );
+                        SetStretchBltMode( hdcStretch, HALFTONE );
+                        StretchBlt( hdcStretch, 0, 0, clientW, clientH,
+                                    hdcMem, 0, 0, m_pixW, m_pixH, SRCCOPY );
+                        UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
+                                             hdcStretch, &ptSrc, 0, &blend, ULW_ALPHA );
+                        SelectObject( hdcStretch, hOldStretch );
+                        DeleteObject( hBmpStretch );
+                    }
+                    DeleteDC( hdcStretch );
+                }
+                else
+                {
+                    UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
+                                         hdcMem, &ptSrc, 0, &blend, ULW_ALPHA );
+                }
+
+                SelectObject( hdcMem, hOld );
+                DeleteObject( hBmp );
+            }
+            DeleteDC( hdcMem );
+            ReleaseDC( nullptr, hdcScreen );
+        }
     }
 }
 
@@ -175,33 +264,10 @@ void WebcamPreviewWindow::OnTimer()
 //----------------------------------------------------------------------------
 void WebcamPreviewWindow::OnPaint()
 {
+    // Layered windows don't receive WM_PAINT in the normal sense.
+    // Just validate the region so Windows doesn't keep sending it.
     PAINTSTRUCT ps;
-    HDC hdc = BeginPaint( m_hwnd, &ps );
-
-    if( m_pixW > 0 && m_pixH > 0 && !m_pixels.empty() )
-    {
-        RECT rc;
-        GetClientRect( m_hwnd, &rc );
-        int clientW = rc.right - rc.left;
-        int clientH = rc.bottom - rc.top;
-
-        // Stretch-blit the webcam pixels to fill the preview window.
-        StretchDIBits( hdc,
-                       0, 0, clientW, clientH,
-                       0, 0, static_cast<int>( m_pixW ), static_cast<int>( m_pixH ),
-                       m_pixels.data(),
-                       &m_bmi,
-                       DIB_RGB_COLORS,
-                       SRCCOPY );
-    }
-    else
-    {
-        // No frame yet — fill with black.
-        RECT rc;
-        GetClientRect( m_hwnd, &rc );
-        FillRect( hdc, &rc, static_cast<HBRUSH>( GetStockObject( BLACK_BRUSH ) ) );
-    }
-
+    BeginPaint( m_hwnd, &ps );
     EndPaint( m_hwnd, &ps );
 }
 

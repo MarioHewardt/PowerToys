@@ -32,6 +32,9 @@ public:
     // Size constants matching g_WebcamSize values.
     enum Size { Small = 0, Medium = 1, Large = 2, XLarge = 3, FullScreen = 4 };
 
+    // Shape constants matching g_WebcamShape values.
+    enum Shape { Square = 0, RoundedRect = 1, Circle = 2 };
+
     WebcamCapture(
         winrt::com_ptr<ID3D11Device> const& device,
         winrt::com_ptr<ID3D11DeviceContext> const& context,
@@ -39,7 +42,8 @@ public:
         UINT outputWidth,
         UINT outputHeight,
         Position position,
-        Size size );
+        Size size,
+        Shape shape );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -95,6 +99,12 @@ private:
     UINT                                m_texW = 0;
     UINT                                m_texH = 0;
 
+    // Staging texture for alpha-blended compositing (shaped overlays).
+    winrt::com_ptr<ID3D11Texture2D>     m_stagingTex;
+    UINT                                m_stagingW = 0;
+    UINT                                m_stagingH = 0;
+    std::vector<BYTE>                   m_lastUploadedPixels;
+
     // Reusable frame buffer for the capture thread (avoids per-frame alloc).
     std::vector<BYTE>                   m_framePixels;
     std::vector<BYTE>                   m_scaledPixels;
@@ -110,6 +120,7 @@ private:
     UINT                                m_outputHeight = 0;
     Position                            m_position = BottomRight;
     Size                                m_size = Medium;
+    Shape                               m_shape = Square;
 
     // Capture thread.
     std::thread                         m_thread;

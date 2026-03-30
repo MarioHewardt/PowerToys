@@ -30,6 +30,7 @@ extern DWORD g_TrimDialogVolume;
 extern BOOLEAN g_WebcamOverlay;
 extern DWORD g_WebcamPosition;
 extern DWORD g_WebcamSize;
+extern DWORD g_WebcamShape;
 extern TCHAR g_WebcamDeviceSymLink[MAX_PATH];
 extern class ClassRegistry reg;
 extern REG_SETTING RegSettings[];
@@ -1020,7 +1021,8 @@ VideoRecordingSession::VideoRecordingSession(
             static_cast<UINT>( outputWidth ),
             static_cast<UINT>( outputHeight ),
             static_cast<WebcamCapture::Position>( g_WebcamPosition ),
-            static_cast<WebcamCapture::Size>( g_WebcamSize ) );
+            static_cast<WebcamCapture::Size>( g_WebcamSize ),
+            static_cast<WebcamCapture::Shape>( g_WebcamShape ) );
         m_webcamCapture->Start();
         RecDiag( L"Constructor: WebcamCapture::Start() returned\n" );
     }

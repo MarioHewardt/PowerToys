@@ -2983,6 +2983,11 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
+                {
+                    bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
+                    EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
+                    EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE), webcamEnabled && !isFullScreen);
+                }
             }
         }
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == IDC_WEBCAM_OVERLAY) {
@@ -2994,6 +2999,19 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
+            {
+                bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE), webcamEnabled && !isFullScreen);
+            }
+        }
+        // Handle webcam size combo change — disable shape when Full screen selected
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == IDC_WEBCAM_SIZE) {
+            bool isGif = (g_RecordingFormat == RecordingFormat::GIF);
+            bool webcamEnabled = !isGif && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
+            bool isFullScreen = SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE), webcamEnabled && !isFullScreen);
         }
 
         switch ( LOWORD( wParam )) {
@@ -4961,6 +4979,14 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamSize), static_cast<LPARAM>(0) );
         }
 
+        // Webcam shape combo
+        {
+            const wchar_t* shapes[] = { L"Square", L"Rounded", L"Circle" };
+            for( int i = 0; i < 3; i++ )
+                SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE ), static_cast<UINT>(CB_ADDSTRING), static_cast<WPARAM>(0), reinterpret_cast<LPARAM>(shapes[i]) );
+            SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamShape), static_cast<LPARAM>(0) );
+        }
+
         // Set initial enabled state for webcam controls
         {
             bool webcamEnabled = !isGifSelected && g_WebcamOverlay;
@@ -4971,6 +4997,11 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), webcamEnabled);
+            {
+                bool isFullScreen = webcamEnabled && g_WebcamSize == 4;
+                EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
+                EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE), webcamEnabled && !isFullScreen);
+            }
         }
 
         if( GetFileAttributes( g_DemoTypeFile ) == -1 )
@@ -5339,6 +5370,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             g_WebcamOverlay = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
             g_WebcamPosition = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), CB_GETCURSEL, 0, 0));
             g_WebcamSize = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0));
+            g_WebcamShape = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE), CB_GETCURSEL, 0, 0));
             {
                 int wcIndex = static_cast<int>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_DEVICE), CB_GETCURSEL, 0, 0));
                 _tcscpy( g_WebcamDeviceSymLink, wcIndex == 0 ? L"" : webcams[static_cast<size_t>(wcIndex) - 1].first.c_str() );

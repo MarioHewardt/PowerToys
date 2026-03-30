@@ -122,6 +122,8 @@
 #define IDC_WEBCAM_DEVICE_LABEL         1119
 #define IDC_WEBCAM_POSITION_LABEL       1120
 #define IDC_WEBCAM_SIZE_LABEL           1121
+#define IDC_WEBCAM_SHAPE                1123
+#define IDC_WEBCAM_SHAPE_LABEL          1124
 #define IDC_TRIM_APPEND                 1122
 #define IDC_SAVE                        40002
 #define IDC_COPY                        40004

@@ -63,9 +63,6 @@ private:
     UINT              m_pixW = 0;
     UINT              m_pixH = 0;
 
-    // Cached BITMAPINFO for SetDIBitsToDevice.
-    BITMAPINFO        m_bmi = {};
-
     // Drag state.
     bool              m_dragging = false;
     POINT             m_dragOffset = {};      // cursor offset from window topleft

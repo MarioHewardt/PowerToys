@@ -30,7 +30,8 @@ WebcamCapture::WebcamCapture(
     UINT outputWidth,
     UINT outputHeight,
     Position position,
-    Size size )
+    Size size,
+    Shape shape )
     : m_d3dDevice( device )
     , m_d3dContext( context )
     , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
@@ -38,6 +39,7 @@ WebcamCapture::WebcamCapture(
     , m_outputHeight( outputHeight )
     , m_position( position )
     , m_size( size )
+    , m_shape( shape )
 {
 }
 
@@ -469,6 +471,12 @@ void WebcamCapture::CaptureThread()
                 }
             }
 
+            // Pre-compute shape mask parameters.
+            const float halfW = ovW * 0.5f;
+            const float halfH = ovH * 0.5f;
+            // Rounded-rect corner radius: 10% of the smaller dimension.
+            const float cornerRadius = min( halfW, halfH ) * 0.10f;
+
             for( UINT y = 0; y < ovH; y++ )
             {
                 const UINT srcY = srcCropY + y * srcCropH / ovH;
@@ -478,7 +486,52 @@ void WebcamCapture::CaptureThread()
                 for( UINT x = 0; x < ovW; x++ )
                 {
                     const UINT srcX = srcCropX + x * srcCropW / ovW;
-                    dstRow[x] = srcRow[srcX] | 0xFF000000u;
+                    UINT32 pixel = srcRow[srcX];
+
+                    bool inside = true;
+                    if( m_shape == Circle )
+                    {
+                        // True circle: use min(halfW, halfH) as radius
+                        // so the shape is always circular, centered, and
+                        // inscribed within the smaller dimension.
+                        float radius = min( halfW, halfH );
+                        float dx = ( x + 0.5f - halfW ) / radius;
+                        float dy = ( y + 0.5f - halfH ) / radius;
+                        inside = ( dx * dx + dy * dy ) <= 1.0f;
+                    }
+                    else if( m_shape == RoundedRect )
+                    {
+                        // Check corners only — the interior and edges are always inside.
+                        float px = static_cast<float>( x ) + 0.5f;
+                        float py = static_cast<float>( y ) + 0.5f;
+                        float cx = 0, cy = 0;
+                        bool inCorner = false;
+                        if( px < cornerRadius && py < cornerRadius )
+                        {
+                            cx = cornerRadius; cy = cornerRadius; inCorner = true;
+                        }
+                        else if( px > ovW - cornerRadius && py < cornerRadius )
+                        {
+                            cx = ovW - cornerRadius; cy = cornerRadius; inCorner = true;
+                        }
+                        else if( px < cornerRadius && py > ovH - cornerRadius )
+                        {
+                            cx = cornerRadius; cy = ovH - cornerRadius; inCorner = true;
+                        }
+                        else if( px > ovW - cornerRadius && py > ovH - cornerRadius )
+                        {
+                            cx = ovW - cornerRadius; cy = ovH - cornerRadius; inCorner = true;
+                        }
+                        if( inCorner )
+                        {
+                            float ddx = px - cx;
+                            float ddy = py - cy;
+                            inside = ( ddx * ddx + ddy * ddy ) <= ( cornerRadius * cornerRadius );
+                        }
+                    }
+                    // Square: inside is always true (no masking).
+
+                    dstRow[x] = inside ? ( pixel | 0xFF000000u ) : 0x00000000u;
                 }
             }
 
@@ -672,6 +725,10 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
                 m_overlayTex.get(), 0, nullptr,
                 m_pendingPixels.data(), m_overlayW * 4, 0 );
 
+            // Keep a CPU copy for alpha-blended compositing (shaped overlays).
+            if( m_shape != Square )
+                m_lastUploadedPixels = m_pendingPixels;
+
             m_hasOverlay = true;
             m_newFrameReady = false;
         }
@@ -695,21 +752,125 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     if( !m_hasOverlay )
         return false;
 
-    // Fast GPU-only blit.
-    D3D11_TEXTURE2D_DESC targetDesc = {};
-    target->GetDesc( &targetDesc );
+    // For Square shape, use the fast GPU-only blit (no alpha needed).
+    // For RoundedRect/Circle, we need alpha blending.
+    if( m_shape == Square )
+    {
+        D3D11_TEXTURE2D_DESC targetDesc = {};
+        target->GetDesc( &targetDesc );
 
-    UINT destX = static_cast<UINT>( max( 0L, m_destRect.left ) );
-    UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
+        UINT destX = static_cast<UINT>( max( 0L, m_destRect.left ) );
+        UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
 
-    D3D11_BOX srcBox = {};
-    srcBox.right = min( m_overlayW, targetDesc.Width - destX );
-    srcBox.bottom = min( m_overlayH, targetDesc.Height - destY );
-    srcBox.back = 1;
+        D3D11_BOX srcBox = {};
+        srcBox.right = min( m_overlayW, targetDesc.Width - destX );
+        srcBox.bottom = min( m_overlayH, targetDesc.Height - destY );
+        srcBox.back = 1;
 
-    m_d3dContext->CopySubresourceRegion(
-        target, 0, destX, destY, 0,
-        m_overlayTex.get(), 0, &srcBox );
+        m_d3dContext->CopySubresourceRegion(
+            target, 0, destX, destY, 0,
+            m_overlayTex.get(), 0, &srcBox );
+    }
+    else
+    {
+        // Alpha-blended compositing for shaped overlays.
+        // Read the target region into a staging texture, blend overlay
+        // pixels on CPU, then copy back. The overlay is small (typically
+        // 200-400px wide) so this is fast.
+        D3D11_TEXTURE2D_DESC targetDesc = {};
+        target->GetDesc( &targetDesc );
+
+        UINT destX = static_cast<UINT>( max( 0L, m_destRect.left ) );
+        UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
+        UINT copyW = min( m_overlayW, targetDesc.Width - destX );
+        UINT copyH = min( m_overlayH, targetDesc.Height - destY );
+
+        if( copyW == 0 || copyH == 0 )
+            return false;
+
+        // Create or reuse staging textures for readback/upload.
+        if( !m_stagingTex || m_stagingW != copyW || m_stagingH != copyH )
+        {
+            m_stagingTex = nullptr;
+            D3D11_TEXTURE2D_DESC stagingDesc = {};
+            stagingDesc.Width = copyW;
+            stagingDesc.Height = copyH;
+            stagingDesc.MipLevels = 1;
+            stagingDesc.ArraySize = 1;
+            stagingDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            stagingDesc.SampleDesc.Count = 1;
+            stagingDesc.Usage = D3D11_USAGE_STAGING;
+            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
+            if( FAILED( m_d3dDevice->CreateTexture2D( &stagingDesc, nullptr, m_stagingTex.put() ) ) )
+                return false;
+            m_stagingW = copyW;
+            m_stagingH = copyH;
+        }
+
+        // Copy the target region to staging for readback.
+        D3D11_BOX targetBox = {};
+        targetBox.left = destX;
+        targetBox.top = destY;
+        targetBox.right = destX + copyW;
+        targetBox.bottom = destY + copyH;
+        targetBox.back = 1;
+        m_d3dContext->CopySubresourceRegion( m_stagingTex.get(), 0, 0, 0, 0,
+                                             target, 0, &targetBox );
+
+        // Map staging, blend overlay pixels.
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if( SUCCEEDED( m_d3dContext->Map( m_stagingTex.get(), 0, D3D11_MAP_READ_WRITE, 0, &mapped ) ) )
+        {
+            // Also need overlay pixels. Map the overlay texture via a
+            // separate staging texture, or use the cached CPU pixels.
+            // Using the cached CPU pixels (m_pendingPixels) is simplest.
+            // But m_pendingPixels may have been swapped — use a lock-free
+            // copy stored during upload.
+            // Actually, the overlay texture already has the data. We can
+            // copy it to another staging texture and map it. But simpler:
+            // keep a CPU copy of the last-uploaded pixels.
+            const UINT32* overlayPixels = reinterpret_cast<const UINT32*>( m_lastUploadedPixels.data() );
+            if( !m_lastUploadedPixels.empty() )
+            {
+                for( UINT row = 0; row < copyH; row++ )
+                {
+                    UINT32* dstRow = reinterpret_cast<UINT32*>(
+                        static_cast<BYTE*>( mapped.pData ) + row * mapped.RowPitch );
+                    const UINT32* srcRow = overlayPixels + row * m_overlayW;
+
+                    for( UINT col = 0; col < copyW; col++ )
+                    {
+                        UINT32 ovPixel = srcRow[col];
+                        UINT32 ovAlpha = ( ovPixel >> 24 ) & 0xFF;
+                        if( ovAlpha == 0xFF )
+                        {
+                            dstRow[col] = ovPixel;
+                        }
+                        else if( ovAlpha > 0 )
+                        {
+                            // Alpha blend: dst = src * alpha + dst * (1-alpha)
+                            UINT32 bg = dstRow[col];
+                            UINT32 invAlpha = 255 - ovAlpha;
+                            UINT32 r = ( ( ( ovPixel >> 16 ) & 0xFF ) * ovAlpha + ( ( bg >> 16 ) & 0xFF ) * invAlpha ) / 255;
+                            UINT32 g = ( ( ( ovPixel >> 8 ) & 0xFF ) * ovAlpha + ( ( bg >> 8 ) & 0xFF ) * invAlpha ) / 255;
+                            UINT32 b = ( ( ovPixel & 0xFF ) * ovAlpha + ( bg & 0xFF ) * invAlpha ) / 255;
+                            dstRow[col] = 0xFF000000u | ( r << 16 ) | ( g << 8 ) | b;
+                        }
+                        // ovAlpha == 0: keep background pixel unchanged.
+                    }
+                }
+            }
+            m_d3dContext->Unmap( m_stagingTex.get(), 0 );
+
+            // Copy blended staging back to the target.
+            D3D11_BOX stagingBox = {};
+            stagingBox.right = copyW;
+            stagingBox.bottom = copyH;
+            stagingBox.back = 1;
+            m_d3dContext->CopySubresourceRegion( target, 0, destX, destY, 0,
+                                                 m_stagingTex.get(), 0, &stagingBox );
+        }
+    }
 
     return true;
 }
