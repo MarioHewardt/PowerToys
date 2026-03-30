@@ -4472,15 +4472,6 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
         {
             SetDlgItemText(hDlg, IDOK, L"Save As");
         }
-        else
-        {
-            // Hide Append button in non-standalone mode (post-recording trim)
-            HWND hAppendBtn = GetDlgItem(hDlg, IDC_TRIM_APPEND);
-            if (hAppendBtn)
-            {
-                ShowWindow(hAppendBtn, SW_HIDE);
-            }
-        }
 
         // Subclass the dialog to handle resize grip hit testing
         SetWindowSubclass(hDlg, TrimDialogSubclassProc, 0, reinterpret_cast<DWORD_PTR>(pData));

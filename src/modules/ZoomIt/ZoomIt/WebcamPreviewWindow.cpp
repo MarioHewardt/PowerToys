@@ -142,6 +142,12 @@ void WebcamPreviewWindow::OnTimer()
     if( !m_capture )
         return;
 
+    // Re-assert topmost Z-order so the preview stays above the live zoom
+    // magnification window during drawing mode.  SWP_NOACTIVATE keeps
+    // keyboard focus where it belongs.
+    SetWindowPos( m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+
     UINT w = 0, h = 0;
     if( m_capture->GetLatestPixels( m_pixels, w, h ) )
     {
