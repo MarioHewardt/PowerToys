@@ -4272,6 +4272,15 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
         {
             SetDlgItemText(hDlg, IDOK, L"Save As");
         }
+        else
+        {
+            // Hide Append button in non-standalone mode (post-recording trim)
+            HWND hAppendBtn = GetDlgItem(hDlg, IDC_TRIM_APPEND);
+            if (hAppendBtn)
+            {
+                ShowWindow(hAppendBtn, SW_HIDE);
+            }
+        }
 
         // Subclass the dialog to handle resize grip hit testing
         SetWindowSubclass(hDlg, TrimDialogSubclassProc, 0, reinterpret_cast<DWORD_PTR>(pData));
@@ -5641,10 +5650,11 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                     auto pos = pData->videoPath.find_last_of(L"\\/");
                     suggestedName = (pos != std::wstring::npos) ? pData->videoPath.substr(pos + 1) : pData->videoPath;
                     auto dot = suggestedName.find_last_of(L'.');
+                    const wchar_t* suffix = pData->clipBoundaries.empty() ? L"_trimmed" : L"_composed";
                     if (dot != std::wstring::npos)
-                        suggestedName.insert(dot, L"_trimmed");
+                        suggestedName.insert(dot, suffix);
                     else
-                        suggestedName += L"_trimmed";
+                        suggestedName += suffix;
                 }
 
                 if (pData->isGif)
@@ -5660,7 +5670,9 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                     saveDialog->SetFileTypes(_countof(fileTypes), fileTypes);
                 }
                 saveDialog->SetFileName(suggestedName.c_str());
-                saveDialog->SetTitle(L"ZoomIt: Save Trimmed Video As...");
+                saveDialog->SetTitle(pData->clipBoundaries.empty()
+                    ? L"ZoomIt: Save Trimmed Video As..."
+                    : L"ZoomIt: Save Composed Video As...");
 
                 HRESULT hr = saveDialog->Show(hDlg);
                 if (FAILED(hr))
