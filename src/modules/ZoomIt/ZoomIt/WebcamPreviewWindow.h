@@ -64,7 +64,8 @@ private:
 
     UINT  HitTestEdge( int x, int y ) const;
     LPCTSTR CursorForEdge( UINT edge ) const;
-    static void ForceEdgeAlpha( void* pBits, int width, int height, int grab );
+    static void ForceEdgeAlpha( void* pBits, int width, int height, int grab,
+                                WebcamCapture::Shape shape );
 
     static constexpr UINT_PTR TIMER_ID = 1;
     static constexpr UINT     TIMER_MS = 33;   // ~30 fps refresh

@@ -87,6 +87,9 @@ public:
     UINT GetOutputWidth()  const { return m_outputWidth; }
     UINT GetOutputHeight() const { return m_outputHeight; }
 
+    // Return the overlay shape.
+    Shape GetShape() const { return m_shape; }
+
 private:
     void CaptureThread();
     bool InitSourceReader();

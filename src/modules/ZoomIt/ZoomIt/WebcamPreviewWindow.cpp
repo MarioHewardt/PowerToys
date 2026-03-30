@@ -11,6 +11,7 @@
 #include "pch.h"
 #include "WebcamPreviewWindow.h"
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
+#include <cmath>       // sqrtf, fabsf, atan2f
 
 // Defined in Zoomit.cpp; compiles to nothing in Release builds.
 void OutputDebug( const TCHAR* format, ... );
@@ -248,7 +249,8 @@ void WebcamPreviewWindow::OnTimer()
                         SetStretchBltMode( hdcStretch, HALFTONE );
                         StretchBlt( hdcStretch, 0, 0, clientW, clientH,
                                     hdcMem, 0, 0, m_pixW, m_pixH, SRCCOPY );
-                        ForceEdgeAlpha( pvStretch, clientW, clientH, EDGE_GRAB );
+                        ForceEdgeAlpha( pvStretch, clientW, clientH, EDGE_GRAB,
+                                        m_capture ? m_capture->GetShape() : WebcamCapture::Square );
                         if( !UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
                                              hdcStretch, &ptSrc, 0, &blend, ULW_ALPHA ) )
                         {
@@ -262,7 +264,8 @@ void WebcamPreviewWindow::OnTimer()
                 }
                 else
                 {
-                    ForceEdgeAlpha( pvBits, clientW, clientH, EDGE_GRAB );
+                    ForceEdgeAlpha( pvBits, clientW, clientH, EDGE_GRAB,
+                                    m_capture ? m_capture->GetShape() : WebcamCapture::Square );
                     if( !UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
                                          hdcMem, &ptSrc, 0, &blend, ULW_ALPHA ) )
                     {
@@ -306,44 +309,77 @@ void WebcamPreviewWindow::OnPaint()
 // NOTE: SetWindowRgn cannot be used with UpdateLayeredWindow — MSDN
 // documents the combination as undefined behaviour.
 //----------------------------------------------------------------------------
-void WebcamPreviewWindow::ForceEdgeAlpha( void* pBits, int width, int height, int grab )
+void WebcamPreviewWindow::ForceEdgeAlpha( void* pBits, int width, int height, int grab,
+                                          WebcamCapture::Shape shape )
 {
     UINT32* pixels = static_cast<UINT32*>( pBits );
-    int grabX = min( grab, width );
-    int grabY = min( grab, height );
 
-    // Top edge rows.
-    for( int y = 0; y < grabY; y++ )
-        for( int x = 0; x < width; x++ )
-        {
-            UINT32& px = pixels[y * width + x];
-            if( ( px >> 24 ) == 0 )
-                px = 0x01000000;  // alpha=1, premultiplied black
-        }
-
-    // Bottom edge rows.
-    for( int y = max( grabY, height - grab ); y < height; y++ )
-        for( int x = 0; x < width; x++ )
-        {
-            UINT32& px = pixels[y * width + x];
-            if( ( px >> 24 ) == 0 )
-                px = 0x01000000;
-        }
-
-    // Left and right columns in the middle rows.
-    for( int y = grabY; y < height - grab; y++ )
+    if( shape == WebcamCapture::Circle )
     {
-        for( int x = 0; x < grabX; x++ )
+        // Force alpha=1 in an annular ring around the inscribed circle.
+        const float cx = width  * 0.5f;
+        const float cy = height * 0.5f;
+        const float radius = min( cx, cy );
+        const float rOuter = radius + grab;
+        const float rInner = max( 0.0f, radius - grab );
+        const float rOuter2 = rOuter * rOuter;
+        const float rInner2 = rInner * rInner;
+
+        for( int y = 0; y < height; y++ )
         {
-            UINT32& px = pixels[y * width + x];
-            if( ( px >> 24 ) == 0 )
-                px = 0x01000000;
+            const float dy = y + 0.5f - cy;
+            for( int x = 0; x < width; x++ )
+            {
+                const float dx = x + 0.5f - cx;
+                const float d2 = dx * dx + dy * dy;
+                if( d2 >= rInner2 && d2 <= rOuter2 )
+                {
+                    UINT32& px = pixels[y * width + x];
+                    if( ( px >> 24 ) == 0 )
+                        px = 0x01000000;  // alpha=1, premultiplied black
+                }
+            }
         }
-        for( int x = max( grabX, width - grab ); x < width; x++ )
+    }
+    else
+    {
+        // Rectangular / rounded-rect: force alpha on the rectangular border.
+        int grabX = min( grab, width );
+        int grabY = min( grab, height );
+
+        // Top edge rows.
+        for( int y = 0; y < grabY; y++ )
+            for( int x = 0; x < width; x++ )
+            {
+                UINT32& px = pixels[y * width + x];
+                if( ( px >> 24 ) == 0 )
+                    px = 0x01000000;
+            }
+
+        // Bottom edge rows.
+        for( int y = max( grabY, height - grab ); y < height; y++ )
+            for( int x = 0; x < width; x++ )
+            {
+                UINT32& px = pixels[y * width + x];
+                if( ( px >> 24 ) == 0 )
+                    px = 0x01000000;
+            }
+
+        // Left and right columns in the middle rows.
+        for( int y = grabY; y < height - grab; y++ )
         {
-            UINT32& px = pixels[y * width + x];
-            if( ( px >> 24 ) == 0 )
-                px = 0x01000000;
+            for( int x = 0; x < grabX; x++ )
+            {
+                UINT32& px = pixels[y * width + x];
+                if( ( px >> 24 ) == 0 )
+                    px = 0x01000000;
+            }
+            for( int x = max( grabX, width - grab ); x < width; x++ )
+            {
+                UINT32& px = pixels[y * width + x];
+                if( ( px >> 24 ) == 0 )
+                    px = 0x01000000;
+            }
         }
     }
 }
@@ -359,12 +395,60 @@ UINT WebcamPreviewWindow::HitTestEdge( int x, int y ) const
 {
     RECT rc;
     GetClientRect( m_hwnd, &rc );
+    const int w = rc.right;
+    const int h = rc.bottom;
 
+    if( m_capture && m_capture->GetShape() == WebcamCapture::Circle )
+    {
+        // Circle mode: hit-test against the inscribed circle's circumference.
+        const float cx = w * 0.5f;
+        const float cy = h * 0.5f;
+        const float radius = min( cx, cy );
+        const float dx = x - cx;
+        const float dy = y - cy;
+        const float dist = sqrtf( dx * dx + dy * dy );
+
+        // Only treat as edge if within EDGE_GRAB of the circumference.
+        if( fabsf( dist - radius ) > EDGE_GRAB )
+            return EdgeNone;  // interior (drag) or outside the circle
+
+        // Determine which edge(s) based on 45° octants.
+        // atan2 returns angle from center; map to edge flags.
+        // Note: screen Y is inverted (down = positive), so negate dy for angle.
+        float angle = atan2f( -dy, dx );  // radians, 0=right, PI/2=up
+        if( angle < 0 ) angle += 6.2831853f;  // normalize to [0, 2*PI)
+
+        // 8 octants of 45° each, centered on cardinal/diagonal directions:
+        //   Right:        337.5° – 22.5°   (octant 0)
+        //   Top+Right:     22.5° – 67.5°   (octant 1)
+        //   Top:           67.5° – 112.5°  (octant 2)
+        //   Top+Left:     112.5° – 157.5°  (octant 3)
+        //   Left:         157.5° – 202.5°  (octant 4)
+        //   Bottom+Left:  202.5° – 247.5°  (octant 5)
+        //   Bottom:       247.5° – 292.5°  (octant 6)
+        //   Bottom+Right: 292.5° – 337.5°  (octant 7)
+        const float PI_8 = 0.3926991f;  // PI/8
+        int octant = static_cast<int>( ( angle + PI_8 ) / ( 2 * PI_8 ) ) % 8;
+
+        static const UINT octantEdge[8] = {
+            EdgeRight,                 // 0: right
+            EdgeRight | EdgeTop,       // 1: top-right
+            EdgeTop,                   // 2: top
+            EdgeLeft  | EdgeTop,       // 3: top-left
+            EdgeLeft,                  // 4: left
+            EdgeLeft  | EdgeBottom,    // 5: bottom-left
+            EdgeBottom,                // 6: bottom
+            EdgeRight | EdgeBottom,    // 7: bottom-right
+        };
+        return octantEdge[octant];
+    }
+
+    // Rectangular / rounded-rect: use rectangular edge zones.
     UINT edge = EdgeNone;
     if( x <= EDGE_GRAB )                    edge |= EdgeLeft;
-    if( x >= rc.right - EDGE_GRAB )         edge |= EdgeRight;
+    if( x >= w - EDGE_GRAB )                edge |= EdgeRight;
     if( y <= EDGE_GRAB )                    edge |= EdgeTop;
-    if( y >= rc.bottom - EDGE_GRAB )        edge |= EdgeBottom;
+    if( y >= h - EDGE_GRAB )                edge |= EdgeBottom;
     return edge;
 }
 
