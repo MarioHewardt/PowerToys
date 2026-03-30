@@ -63,6 +63,11 @@ public:
     // webcam overlay is composited.  Valid after first frame is captured.
     RECT GetDestRect() const { return m_destRect; }
 
+    // Update the destination rect (in recording-output coordinates).
+    // Called from the preview window when the user drags the webcam overlay.
+    // Thread-safe: the encoder reads m_destRect from the encoder thread.
+    void SetDestRect( RECT rect ) { m_destRect = rect; }
+
     // Return the recording output dimensions (for screen-coordinate mapping).
     UINT GetOutputWidth()  const { return m_outputWidth; }
     UINT GetOutputHeight() const { return m_outputHeight; }

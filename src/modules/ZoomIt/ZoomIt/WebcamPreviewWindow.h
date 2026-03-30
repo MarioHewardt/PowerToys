@@ -44,6 +44,10 @@ private:
     void OnPaint();
     void OnTimer();
     RECT ComputeScreenRect() const;
+    void OnLButtonDown( int x, int y );
+    void OnMouseMove( int x, int y );
+    void OnLButtonUp();
+    void SyncOverlayPosition();  // Push preview position to WebcamCapture
 
     static constexpr UINT_PTR TIMER_ID = 1;
     static constexpr UINT     TIMER_MS = 33;   // ~30 fps refresh
@@ -61,4 +65,8 @@ private:
 
     // Cached BITMAPINFO for SetDIBitsToDevice.
     BITMAPINFO        m_bmi = {};
+
+    // Drag state.
+    bool              m_dragging = false;
+    POINT             m_dragOffset = {};      // cursor offset from window topleft
 };

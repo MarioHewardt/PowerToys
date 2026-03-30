@@ -10,6 +10,7 @@
 //==============================================================================
 #include "pch.h"
 #include "WebcamPreviewWindow.h"
+#include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 
 // Defined in Zoomit.cpp; compiles to nothing in Release builds.
 void OutputDebug( const TCHAR* format, ... );
@@ -207,6 +208,107 @@ void WebcamPreviewWindow::OnPaint()
 //----------------------------------------------------------------------------
 // WebcamPreviewWindow::WndProc
 //----------------------------------------------------------------------------
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::OnLButtonDown
+//----------------------------------------------------------------------------
+void WebcamPreviewWindow::OnLButtonDown( int x, int y )
+{
+    m_dragging = true;
+    m_dragOffset = { x, y };
+    SetCapture( m_hwnd );
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::OnMouseMove
+//----------------------------------------------------------------------------
+void WebcamPreviewWindow::OnMouseMove( int x, int y )
+{
+    if( !m_dragging )
+        return;
+
+    // Compute new window position from cursor.
+    POINT cursor = { x, y };
+    ClientToScreen( m_hwnd, &cursor );
+
+    RECT wndRect;
+    GetWindowRect( m_hwnd, &wndRect );
+    int wndW = wndRect.right - wndRect.left;
+    int wndH = wndRect.bottom - wndRect.top;
+
+    int newX = cursor.x - m_dragOffset.x;
+    int newY = cursor.y - m_dragOffset.y;
+
+    // Constrain to recording region.
+    if( newX < m_screenRect.left )
+        newX = m_screenRect.left;
+    if( newY < m_screenRect.top )
+        newY = m_screenRect.top;
+    if( newX + wndW > m_screenRect.right )
+        newX = m_screenRect.right - wndW;
+    if( newY + wndH > m_screenRect.bottom )
+        newY = m_screenRect.bottom - wndH;
+
+    SetWindowPos( m_hwnd, nullptr, newX, newY, 0, 0,
+                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE );
+
+    // Update the recording overlay position to match.
+    SyncOverlayPosition();
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::OnLButtonUp
+//----------------------------------------------------------------------------
+void WebcamPreviewWindow::OnLButtonUp()
+{
+    if( m_dragging )
+    {
+        m_dragging = false;
+        ReleaseCapture();
+        SyncOverlayPosition();
+    }
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::SyncOverlayPosition
+//
+// Maps the preview window's current screen position back to
+// recording-output coordinates and updates WebcamCapture's destRect.
+//----------------------------------------------------------------------------
+void WebcamPreviewWindow::SyncOverlayPosition()
+{
+    if( !m_capture || !m_hwnd )
+        return;
+
+    RECT wndRect;
+    GetWindowRect( m_hwnd, &wndRect );
+
+    int screenW = m_screenRect.right - m_screenRect.left;
+    int screenH = m_screenRect.bottom - m_screenRect.top;
+    int outW = static_cast<int>( m_outputWidth );
+    int outH = static_cast<int>( m_outputHeight );
+
+    if( screenW <= 0 || screenH <= 0 )
+        return;
+
+    // Map from screen coordinates back to output coordinates.
+    RECT dest;
+    dest.left   = MulDiv( wndRect.left   - m_screenRect.left, outW, screenW );
+    dest.top    = MulDiv( wndRect.top    - m_screenRect.top,  outH, screenH );
+    dest.right  = MulDiv( wndRect.right  - m_screenRect.left, outW, screenW );
+    dest.bottom = MulDiv( wndRect.bottom - m_screenRect.top,  outH, screenH );
+
+    // Clamp to output bounds.
+    if( dest.left < 0 ) { dest.right -= dest.left; dest.left = 0; }
+    if( dest.top < 0 )  { dest.bottom -= dest.top; dest.top = 0; }
+    if( dest.right > outW )  { dest.left -= (dest.right - outW); dest.right = outW; }
+    if( dest.bottom > outH ) { dest.top -= (dest.bottom - outH); dest.bottom = outH; }
+
+    m_capture->SetDestRect( dest );
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::WndProc
+//----------------------------------------------------------------------------
 LRESULT CALLBACK WebcamPreviewWindow::WndProc( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
 {
     WebcamPreviewWindow* self = nullptr;
@@ -240,6 +342,26 @@ LRESULT CALLBACK WebcamPreviewWindow::WndProc( HWND hwnd, UINT msg, WPARAM wPara
 
         case WM_ERASEBKGND:
             return 1;  // Handled — avoid flicker.
+
+        case WM_LBUTTONDOWN:
+            self->OnLButtonDown( GET_X_LPARAM( lParam ), GET_Y_LPARAM( lParam ) );
+            return 0;
+
+        case WM_MOUSEMOVE:
+            self->OnMouseMove( GET_X_LPARAM( lParam ), GET_Y_LPARAM( lParam ) );
+            return 0;
+
+        case WM_LBUTTONUP:
+            self->OnLButtonUp();
+            return 0;
+
+        case WM_SETCURSOR:
+            if( LOWORD( lParam ) == HTCLIENT )
+            {
+                SetCursor( LoadCursor( nullptr, IDC_SIZEALL ) );
+                return TRUE;
+            }
+            break;
 
         case WM_DESTROY:
             self->m_hwnd = nullptr;
