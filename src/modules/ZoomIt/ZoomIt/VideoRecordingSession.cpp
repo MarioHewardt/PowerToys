@@ -3081,7 +3081,22 @@ static winrt::fire_and_forget StartPlaybackAsync(HWND hDlg, VideoRecordingSessio
         pData->frameCopyInProgress.store(false, std::memory_order_relaxed);
         pData->mediaPlayer = newPlayer;
 
-        auto mediaSource = winrt::MediaSource::CreateFromStorageFile(pData->playbackFile);
+        // When clips have been appended, the composition contains the full
+        // multi-clip timeline.  Use GeneratePreviewMediaStreamSource() so
+        // the MediaPlayer can play and seek across clip boundaries.
+        // For a single-file session, use the faster file-based source.
+        winrt::MediaSource mediaSource{ nullptr };
+        if (pData->composition && pData->composition.Clips().Size() > 1)
+        {
+            auto mss = pData->composition.GeneratePreviewMediaStreamSource(
+                static_cast<int>(pData->composition.Clips().GetAt(0).GetVideoEncodingProperties().Width()),
+                static_cast<int>(pData->composition.Clips().GetAt(0).GetVideoEncodingProperties().Height()));
+            mediaSource = winrt::MediaSource::CreateFromMediaStreamSource(mss);
+        }
+        else
+        {
+            mediaSource = winrt::MediaSource::CreateFromStorageFile(pData->playbackFile);
+        }
         VideoRecordingSession::TrimDialogData* dataPtr = pData;
 
         pData->frameAvailableToken = pData->mediaPlayer.VideoFrameAvailable([hDlg, dataPtr](auto const& sender, auto const&)
@@ -4226,6 +4241,135 @@ static LRESULT CALLBACK TrimDialogSubclassProc(
 
     return DefSubclassProc(hWnd, message, wParam, lParam);
 }
+
+//----------------------------------------------------------------------------
+//
+// RenderFadeTransitionClip
+//
+// Pre-renders a fade transition (fade-out from clip1's tail → solid color
+// → fade-in to clip2's head) into a temp MP4 file, then returns a
+// MediaClip created from that file.
+//
+// This approach avoids MediaOverlayLayer, which is NOT rendered by
+// GeneratePreviewMediaStreamSource (used for playback) — only by
+// RenderToFileAsync.  By pre-rendering the transition as a regular file
+// clip, both preview playback and final save show the correct fade.
+//
+//----------------------------------------------------------------------------
+static winrt::MediaClip RenderFadeTransitionClip(
+    winrt::MediaClip const& clip1,
+    winrt::MediaClip const& clip2,
+    winrt::TimeSpan fadeDuration,
+    winrt::Windows::UI::Color transColor )
+{
+    constexpr int kSteps = 15;
+
+    int64_t stepTicks = fadeDuration.count() / kSteps;
+    if( stepTicks <= 0 )
+        return nullptr;
+
+    auto stepDuration = winrt::TimeSpan{ stepTicks };
+    winrt::Rect fullFrame{ 0.f, 0.f, 16384.f, 16384.f };
+
+    // Get source video dimensions for the render output.
+    uint32_t width = 1920, height = 1080;
+    try
+    {
+        auto props = clip1.GetVideoEncodingProperties();
+        width  = props.Width();
+        height = props.Height();
+    }
+    catch( ... ) {}
+
+    // Build a mini composition: [tail of clip1] + [head of clip2]
+    // Each segment is fadeDuration long.
+    winrt::MediaComposition miniComp;
+
+    // Clone clip1 and trim to just the last fadeDuration
+    auto tail = clip1.Clone();
+    {
+        auto origDur = tail.OriginalDuration();
+        int64_t trimFromStart = origDur.count() - tail.TrimTimeFromEnd().count()
+                              - fadeDuration.count();
+        if( trimFromStart > tail.TrimTimeFromStart().count() )
+            tail.TrimTimeFromStart( winrt::TimeSpan{ trimFromStart } );
+        tail.TrimTimeFromEnd( winrt::TimeSpan{ 0 } );
+    }
+    miniComp.Clips().Append( tail );
+
+    // Clone clip2 and trim to just the first fadeDuration
+    auto head = clip2.Clone();
+    {
+        auto origDur = head.OriginalDuration();
+        int64_t trimFromEnd = origDur.count() - head.TrimTimeFromStart().count()
+                            - fadeDuration.count();
+        if( trimFromEnd > 0 )
+            head.TrimTimeFromEnd( winrt::TimeSpan{ trimFromEnd } );
+    }
+    miniComp.Clips().Append( head );
+
+    // Add fade overlays to the mini composition.
+    auto layer = winrt::MediaOverlayLayer();
+
+    // Fade-out overlays: cover the tail segment [0 .. fadeDuration]
+    for( int i = 0; i < kSteps; i++ )
+    {
+        double opacity = static_cast<double>( i + 1 ) / kSteps;
+        auto overlayClip = winrt::MediaClip::CreateFromColor( transColor, stepDuration );
+        auto overlay = winrt::MediaOverlay( overlayClip, fullFrame, opacity );
+        overlay.Delay( winrt::TimeSpan{ static_cast<int64_t>( i ) * stepTicks } );
+        layer.Overlays().Append( overlay );
+    }
+
+    // Fade-in overlays: cover the head segment [fadeDuration .. 2*fadeDuration]
+    int64_t fadeInStart = fadeDuration.count();
+    for( int i = 0; i < kSteps; i++ )
+    {
+        double opacity = static_cast<double>( kSteps - i ) / kSteps;
+        auto overlayClip = winrt::MediaClip::CreateFromColor( transColor, stepDuration );
+        auto overlay = winrt::MediaOverlay( overlayClip, fullFrame, opacity );
+        overlay.Delay( winrt::TimeSpan{ fadeInStart + static_cast<int64_t>( i ) * stepTicks } );
+        layer.Overlays().Append( overlay );
+    }
+
+    miniComp.OverlayLayers().Append( layer );
+
+    // Render the mini composition to a temp file.
+    auto tempPath = std::filesystem::temp_directory_path() / L"ZoomIt";
+    std::filesystem::create_directories( tempPath );
+
+    // Use a unique filename to avoid collisions with multiple appends.
+    static int s_fadeFileCounter = 0;
+    auto filename = L"zoomit_fade_" + std::to_wstring( ++s_fadeFileCounter ) + L".mp4";
+    auto fullPath = tempPath / filename;
+
+    // Delete any existing file with the same name.
+    std::error_code ec;
+    std::filesystem::remove( fullPath, ec );
+
+    auto folder = winrt::StorageFolder::GetFolderFromPathAsync( tempPath.wstring() ).get();
+    auto outFile = folder.CreateFileAsync( filename,
+        winrt::CreationCollisionOption::ReplaceExisting ).get();
+
+    auto profile = winrt::MediaEncodingProfile::CreateMp4(
+        winrt::VideoEncodingQuality::HD1080p );
+    profile.Video().Width( width );
+    profile.Video().Height( height );
+
+    auto result = miniComp.RenderToFileAsync( outFile,
+        winrt::MediaTrimmingPreference::Precise, profile ).get();
+
+    if( result != winrt::TranscodeFailureReason::None )
+    {
+        OutputDebugStringW( L"[FadeTransition] RenderToFileAsync failed\n" );
+        return nullptr;
+    }
+
+    // Create a clip from the rendered file.
+    auto fadeClip = winrt::MediaClip::CreateFromFileAsync( outFile ).get();
+    return fadeClip;
+}
+
 
 //----------------------------------------------------------------------------
 //
@@ -5519,27 +5663,54 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                         auto file = winrt::StorageFile::GetFileFromPathAsync(appendPath).get();
                         auto clip = winrt::MediaClip::CreateFromFileAsync(file).get();
 
-                        // Insert transition clip if requested
                         if (transition != VideoRecordingSession::AppendTransition::None)
                         {
                             winrt::Windows::UI::Color transColor{};
                             if (transition == VideoRecordingSession::AppendTransition::FadeToBlack)
-                            {
                                 transColor = { 255, 0, 0, 0 };
-                            }
                             else if (transition == VideoRecordingSession::AppendTransition::FadeToWhite)
-                            {
                                 transColor = { 255, 255, 255, 255 };
+
+                            auto fadeDuration = winrt::TimeSpan{ 5000000LL }; // 0.5s
+
+                            // Get the last clip currently in the composition (clip1).
+                            auto clips = pData->composition.Clips();
+                            auto lastClip = clips.GetAt( clips.Size() - 1 );
+
+                            // Pre-render the transition segment (tail of clip1 + head of clip2)
+                            // into a temp MP4 file, then insert as a regular clip.
+                            SetCursor( LoadCursor( nullptr, IDC_WAIT ) );
+                            auto fadeClip = RenderFadeTransitionClip(
+                                lastClip, clip, fadeDuration, transColor );
+                            SetCursor( LoadCursor( nullptr, IDC_ARROW ) );
+
+                            if( fadeClip )
+                            {
+                                // Trim the tail of clip1 by fadeDuration.
+                                auto curTrimEnd = lastClip.TrimTimeFromEnd();
+                                lastClip.TrimTimeFromEnd( winrt::TimeSpan{
+                                    curTrimEnd.count() + fadeDuration.count() } );
+
+                                // Trim the head of clip2 by fadeDuration.
+                                auto curTrimStart = clip.TrimTimeFromStart();
+                                clip.TrimTimeFromStart( winrt::TimeSpan{
+                                    curTrimStart.count() + fadeDuration.count() } );
+
+                                // Insert: fade transition clip, then trimmed clip2.
+                                pData->composition.Clips().Append( fadeClip );
+                                pData->composition.Clips().Append( clip );
                             }
-
-                            auto transitionClip = winrt::MediaClip::CreateFromColor(
-                                transColor,
-                                winrt::TimeSpan{ 5000000LL }); // 0.5 seconds
-                            pData->composition.Clips().Append(transitionClip);
+                            else
+                            {
+                                // Fallback: hard cut if render failed.
+                                pData->composition.Clips().Append( clip );
+                            }
                         }
-
-                        // Append the new clip
-                        pData->composition.Clips().Append(clip);
+                        else
+                        {
+                            // No transition — simple append.
+                            pData->composition.Clips().Append( clip );
+                        }
 
                         // Record clip boundary
                         TrimDialogData::ClipBoundary boundary;
@@ -5551,6 +5722,13 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                         pData->videoDuration = pData->composition.Duration();
                         pData->trimEnd = pData->videoDuration;
                         pData->originalTrimEnd = pData->videoDuration;
+
+                        // Invalidate the existing MediaPlayer — it was created from
+                        // the original single file and knows nothing about the
+                        // appended clips.  The next playback will recreate it from
+                        // the composition.
+                        CleanupMediaPlayer(pData);
+                        pData->playbackFile = nullptr;
 
                         // Update UI
                         UpdateDurationDisplay(hDlg, pData);
