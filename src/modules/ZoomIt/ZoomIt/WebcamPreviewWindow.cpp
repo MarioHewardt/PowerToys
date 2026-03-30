@@ -145,9 +145,8 @@ void WebcamPreviewWindow::OnTimer()
         return;
 
     // Re-assert topmost Z-order so the preview stays above the live zoom
-    // magnification window during drawing mode.  The live zoom timer also
-    // pushes us on top (see Zoomit.cpp), but we reinforce here as a
-    // belt-and-suspenders measure.
+    // magnification window.  SWP_NOACTIVATE does not affect SetCapture,
+    // so this is safe even during active drag/resize.
     SetWindowPos( m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
 
@@ -246,7 +245,7 @@ void WebcamPreviewWindow::OnTimer()
                     if( hBmpStretch )
                     {
                         HBITMAP hOldStretch = static_cast<HBITMAP>( SelectObject( hdcStretch, hBmpStretch ) );
-                        SetStretchBltMode( hdcStretch, HALFTONE );
+                        SetStretchBltMode( hdcStretch, COLORONCOLOR );
                         StretchBlt( hdcStretch, 0, 0, clientW, clientH,
                                     hdcMem, 0, 0, m_pixW, m_pixH, SRCCOPY );
                         ForceEdgeAlpha( pvStretch, clientW, clientH, EDGE_GRAB,
@@ -795,18 +794,16 @@ LRESULT CALLBACK WebcamPreviewWindow::WndProc( HWND hwnd, UINT msg, WPARAM wPara
             return 0;
 
         case WM_CAPTURECHANGED:
-            // Another window stole capture — cancel any in-progress
-            // drag or resize so we don't get stuck in a bad state.
-            if( self->m_dragging )
+            // Another window stole capture.  Cancel the current
+            // drag/resize cleanly so the user can start again.
+            if( self->m_dragging || self->m_resizing )
             {
-                OutputDebug( L"[WebcamPreview] Capture lost during drag\n" );
+                OutputDebug( L"[WebcamPreview] Capture lost during %s\n",
+                             self->m_resizing ? L"resize" : L"drag" );
                 self->m_dragging = false;
-            }
-            if( self->m_resizing )
-            {
-                OutputDebug( L"[WebcamPreview] Capture lost during resize\n" );
                 self->m_resizing = false;
                 self->m_resizeEdge = EdgeNone;
+                self->SyncOverlayPosition();
             }
             return 0;
 

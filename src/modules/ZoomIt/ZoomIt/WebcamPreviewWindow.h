@@ -42,6 +42,11 @@ public:
     // Return the HWND so the live zoom timer can keep us above it.
     HWND GetHwnd() const { return m_hwnd; }
 
+    // True when the user is actively dragging or resizing the preview.
+    // Callers (e.g. the live zoom timer) should skip z-order manipulation
+    // while this returns true to avoid disrupting SetCapture.
+    bool IsInteracting() const { return m_dragging || m_resizing; }
+
 private:
     // Edge flags for resize hit-testing (combinable for corners).
     enum ResizeEdge : UINT

@@ -11104,30 +11104,16 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
                 pSetLayeredWindowAttributes( hWnd, 0, 255, LWA_ALPHA );
 
-                // Use DeferWindowPos to set both the zoom and the webcam
-                // preview z-order atomically.  Two separate SetWindowPos
-                // calls create a brief intermediate state where the zoom
-                // is above the preview, causing visible flicker.
+                // Keep the webcam preview above the zoom window.
+                // Two-step: zoom reclaims topmost first, then preview
+                // goes on top.  SWP_NOACTIVATE does not affect
+                // SetCapture, so this is safe during drag/resize.
+                SetWindowPos( hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                              SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
                 if( g_WebcamPreview.IsActive() )
                 {
-                    HDWP hdwp = BeginDeferWindowPos( 2 );
-                    if( hdwp )
-                    {
-                        hdwp = DeferWindowPos( hdwp, hWnd, HWND_TOPMOST, 0, 0, 0, 0,
-                                               SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
-                        if( hdwp )
-                        {
-                            hdwp = DeferWindowPos( hdwp, g_WebcamPreview.GetHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
-                                                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
-                        }
-                        if( hdwp )
-                            EndDeferWindowPos( hdwp );
-                    }
-                }
-                else
-                {
-                    SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
+                    SetWindowPos( g_WebcamPreview.GetHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
+                                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
                 }
 
                 OutputDebug(L"LIVEZOOM RECLAIM\n");
