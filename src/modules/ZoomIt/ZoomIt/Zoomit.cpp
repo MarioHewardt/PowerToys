@@ -16,6 +16,7 @@
 #include "WindowsVersions.h"
 #include "ZoomItSettings.h"
 #include "GifRecordingSession.h"
+#include "WebcamPreviewWindow.h"
 #include "BreakTimer.h"
 #include "PanoramaCapture.h"
 #include <wtsapi32.h>
@@ -209,6 +210,7 @@ BOOLEAN g_running = TRUE;
 BOOL	g_RecordToggle = FALSE;
 BOOL	g_RecordCropping = FALSE;
 SelectRectangle g_SelectRectangle;
+WebcamPreviewWindow g_WebcamPreview;
 std::wstring	g_RecordingSaveLocation;
 std::wstring	g_ScreenshotSaveLocation;
 winrt::IDirect3DDevice	g_RecordDevice{ nullptr };
@@ -6501,6 +6503,7 @@ void StopRecording()
     if( g_RecordToggle == TRUE ) {
 
         OutputDebugStringW(L"[Recording] g_RecordToggle was TRUE, stopping...\n");
+        g_WebcamPreview.Destroy();
         g_SelectRectangle.Stop();
 
         if ( g_RecordingSession != nullptr ) {
@@ -6728,6 +6731,31 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
         _diagLog( L"VideoRecordingSession::Create returned" );
 
         recordingStarted = (g_RecordingSession != nullptr);
+
+        // Show a live on-screen preview of the webcam overlay so the user
+        // can see themselves while recording.
+        if( recordingStarted && g_WebcamOverlay && g_RecordingSession->GetWebcamCapture() )
+        {
+            // Determine the screen region being recorded.
+            RECT screenRect;
+            if( rcCrop->right - rcCrop->left > 0 )
+            {
+                // Region recording: the crop rect IS in screen coordinates.
+                screenRect = *rcCrop;
+            }
+            else
+            {
+                // Full-screen: use the monitor rect.
+                MONITORINFO mi = { sizeof( mi ) };
+                if( pGetMonitorInfo && hMon && pGetMonitorInfo( hMon, &mi ) )
+                    screenRect = mi.rcMonitor;
+                else
+                    SetRect( &screenRect, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
+            }
+
+            auto* wc = g_RecordingSession->GetWebcamCapture();
+            g_WebcamPreview.Create( wc, screenRect, wc->GetOutputWidth(), wc->GetOutputHeight() );
+        }
 
         if( g_hWndLiveZoom != NULL )
             g_RecordingSession->EnableCursorCapture( false );

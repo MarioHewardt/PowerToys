@@ -38,6 +38,12 @@ public:
 
     bool HasCapturedVideoFrames() const { return m_hasVideoSample.load(); }
 
+    // Access the webcam capture for on-screen preview.
+    WebcamCapture* GetWebcamCapture() const { return m_webcamCapture.get(); }
+
+    // Return the crop rect (recording region in capture-item coordinates).
+    RECT GetCropRect() const { return m_rcCrop; }
+
     // Trim and save functionality
     static std::wstring ShowSaveDialogWithTrim(
         HWND hWnd,

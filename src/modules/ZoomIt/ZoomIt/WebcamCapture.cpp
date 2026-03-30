@@ -676,3 +676,21 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 
     return true;
 }
+
+//----------------------------------------------------------------------------
+// WebcamCapture::GetLatestPixels
+//
+// Copies the latest pre-scaled BGRA pixels for on-screen preview.
+// Thread-safe — acquires m_frameLock to read m_pendingPixels.
+//----------------------------------------------------------------------------
+bool WebcamCapture::GetLatestPixels( std::vector<BYTE>& outPixels, UINT& outW, UINT& outH )
+{
+    std::lock_guard<std::mutex> lock( m_frameLock );
+    if( m_pendingPixels.empty() || m_overlayW == 0 || m_overlayH == 0 )
+        return false;
+
+    outPixels = m_pendingPixels;
+    outW = m_overlayW;
+    outH = m_overlayH;
+    return true;
+}

@@ -55,6 +55,18 @@ public:
     // Returns true if a frame was composited.
     bool CompositeOnto( ID3D11Texture2D* target );
 
+    // Copy the latest pre-scaled BGRA pixels for on-screen preview.
+    // Thread-safe (acquires m_frameLock).  Returns true if pixels were copied.
+    bool GetLatestPixels( std::vector<BYTE>& outPixels, UINT& outW, UINT& outH );
+
+    // Return the destination rect (in recording-output coordinates) where the
+    // webcam overlay is composited.  Valid after first frame is captured.
+    RECT GetDestRect() const { return m_destRect; }
+
+    // Return the recording output dimensions (for screen-coordinate mapping).
+    UINT GetOutputWidth()  const { return m_outputWidth; }
+    UINT GetOutputHeight() const { return m_outputHeight; }
+
 private:
     void CaptureThread();
     bool InitSourceReader();
