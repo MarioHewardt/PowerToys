@@ -2466,6 +2466,38 @@ static void DrawTimeline(HDC hdc, RECT rc, VideoRecordingSession::TrimDialogData
     SelectObject(hdcMem, hOldPen);
     DeleteObject(hOutline);
 
+    // Draw clip boundary markers for appended clips
+    if (pData && !pData->clipBoundaries.empty() && pData->videoDuration.count() > 0)
+    {
+        const int trackWidth2 = trackRight - trackLeft;
+        for (const auto& boundary : pData->clipBoundaries)
+        {
+            const double ratio = static_cast<double>(boundary.time.count()) / static_cast<double>(pData->videoDuration.count());
+            const int bx = trackLeft + static_cast<int>(std::round(ratio * trackWidth2));
+
+            // Draw a dashed vertical line at the boundary
+            const int dashLen = ScaleForDpi(3, dpi);
+            const int gapLen = ScaleForDpi(2, dpi);
+            COLORREF boundaryColor;
+            if (boundary.transition == VideoRecordingSession::AppendTransition::FadeToBlack)
+                boundaryColor = darkMode ? RGB(200, 160, 60) : RGB(180, 140, 40);
+            else if (boundary.transition == VideoRecordingSession::AppendTransition::FadeToWhite)
+                boundaryColor = darkMode ? RGB(220, 220, 100) : RGB(200, 200, 60);
+            else
+                boundaryColor = darkMode ? RGB(200, 120, 60) : RGB(180, 100, 40);
+
+            HPEN hBoundaryPen = CreatePen(PS_SOLID, ScaleForDpi(2, dpi), boundaryColor);
+            HPEN hOldBoundaryPen = static_cast<HPEN>(SelectObject(hdcMem, hBoundaryPen));
+            for (int y = trackTop; y < trackBottom; y += dashLen + gapLen)
+            {
+                MoveToEx(hdcMem, bx, y, nullptr);
+                LineTo(hdcMem, bx, (std::min)(y + dashLen, static_cast<int>(trackBottom)));
+            }
+            SelectObject(hdcMem, hOldBoundaryPen);
+            DeleteObject(hBoundaryPen);
+        }
+    }
+
     const int trackWidth = trackRight - trackLeft;
     if (trackWidth > 0 && pData && pData->videoDuration.count() > 0)
     {
@@ -4682,6 +4714,16 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                 SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
+        // Position Append button (left-aligned)
+        HWND hAppend = GetDlgItem(hDlg, IDC_TRIM_APPEND);
+        if (hAppend)
+        {
+            int appendWidth;
+            DluToPixels(55, 0, &appendWidth, nullptr);
+            SetWindowPos(hAppend, nullptr, marginLeft, okCancelY, appendWidth, okCancelHeight,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
         // Re-enable redraw and repaint the entire dialog
         SendMessage(hDlg, WM_SETREDRAW, TRUE, 0);
         // Use RDW_ERASE for the dialog, but invalidate timeline separately without erase to prevent flicker
@@ -5377,6 +5419,204 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
             break;
         }
 
+        case IDC_TRIM_APPEND:
+        {
+            if (HIWORD(wParam) == BN_CLICKED)
+            {
+                pData = reinterpret_cast<TrimDialogData*>(GetWindowLongPtr(hDlg, DWLP_USER));
+                if (!pData)
+                    return TRUE;
+
+                StopPlayback(hDlg, pData);
+
+                // Show file open dialog for the video to append
+                auto openDialog = wil::CoCreateInstance<IFileOpenDialog>(CLSID_FileOpenDialog);
+
+                FILEOPENDIALOGOPTIONS options;
+                if (SUCCEEDED(openDialog->GetOptions(&options)))
+                    openDialog->SetOptions(options | FOS_FORCEFILESYSTEM);
+
+                if (pData->isGif)
+                {
+                    COMDLG_FILTERSPEC fileTypes[] = {
+                        { L"GIF Animation (*.gif)", L"*.gif" }
+                    };
+                    openDialog->SetFileTypes(_countof(fileTypes), fileTypes);
+                }
+                else
+                {
+                    COMDLG_FILTERSPEC fileTypes[] = {
+                        { L"MP4 Video (*.mp4)", L"*.mp4" }
+                    };
+                    openDialog->SetFileTypes(_countof(fileTypes), fileTypes);
+                }
+                openDialog->SetFileTypeIndex(1);
+                openDialog->SetTitle(L"ZoomIt: Select Video to Append...");
+
+                wil::com_ptr<IShellItem> videosFolder;
+                if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_Videos, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&videosFolder))))
+                    openDialog->SetDefaultFolder(videosFolder.get());
+
+                if (FAILED(openDialog->Show(hDlg)))
+                    return TRUE;  // User cancelled
+
+                wil::com_ptr<IShellItem> resultItem;
+                if (FAILED(openDialog->GetResult(&resultItem)))
+                    return TRUE;
+
+                wil::unique_cotaskmem_string pathStr;
+                if (FAILED(resultItem->GetDisplayName(SIGDN_FILESYSPATH, &pathStr)))
+                    return TRUE;
+
+                std::wstring appendPath(pathStr.get());
+
+                // Ask user for transition type
+                auto transition = VideoRecordingSession::AppendTransition::None;
+                if (!pData->isGif)
+                {
+                    // Show transition picker menu
+                    HMENU hMenu = CreatePopupMenu();
+                    AppendMenu(hMenu, MF_STRING, 1, L"No Transition (Hard Cut)");
+                    AppendMenu(hMenu, MF_STRING, 2, L"Fade to Black (0.5s)");
+                    AppendMenu(hMenu, MF_STRING, 3, L"Fade to White (0.5s)");
+
+                    RECT rcButton{};
+                    HWND hAppendBtn = GetDlgItem(hDlg, IDC_TRIM_APPEND);
+                    GetWindowRect(hAppendBtn, &rcButton);
+
+                    int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY,
+                        rcButton.left, rcButton.top, 0, hDlg, nullptr);
+                    DestroyMenu(hMenu);
+
+                    if (cmd == 0)
+                        return TRUE;  // User dismissed menu
+
+                    switch (cmd)
+                    {
+                    case 2: transition = VideoRecordingSession::AppendTransition::FadeToBlack; break;
+                    case 3: transition = VideoRecordingSession::AppendTransition::FadeToWhite; break;
+                    default: transition = VideoRecordingSession::AppendTransition::None; break;
+                    }
+                }
+
+                // Append the clip
+                if (!pData->isGif && pData->composition)
+                {
+                    try
+                    {
+                        // Record the boundary time before appending
+                        auto boundaryTime = pData->composition.Duration();
+
+                        auto file = winrt::StorageFile::GetFileFromPathAsync(appendPath).get();
+                        auto clip = winrt::MediaClip::CreateFromFileAsync(file).get();
+
+                        // Insert transition clip if requested
+                        if (transition != VideoRecordingSession::AppendTransition::None)
+                        {
+                            winrt::Windows::UI::Color transColor{};
+                            if (transition == VideoRecordingSession::AppendTransition::FadeToBlack)
+                            {
+                                transColor = { 255, 0, 0, 0 };
+                            }
+                            else if (transition == VideoRecordingSession::AppendTransition::FadeToWhite)
+                            {
+                                transColor = { 255, 255, 255, 255 };
+                            }
+
+                            auto transitionClip = winrt::MediaClip::CreateFromColor(
+                                transColor,
+                                winrt::TimeSpan{ 5000000LL }); // 0.5 seconds
+                            pData->composition.Clips().Append(transitionClip);
+                        }
+
+                        // Append the new clip
+                        pData->composition.Clips().Append(clip);
+
+                        // Record clip boundary
+                        TrimDialogData::ClipBoundary boundary;
+                        boundary.time = boundaryTime;
+                        boundary.transition = transition;
+                        pData->clipBoundaries.push_back(boundary);
+
+                        // Update duration
+                        pData->videoDuration = pData->composition.Duration();
+                        pData->trimEnd = pData->videoDuration;
+                        pData->originalTrimEnd = pData->videoDuration;
+
+                        // Update UI
+                        UpdateDurationDisplay(hDlg, pData);
+                        UpdatePositionUI(hDlg, pData);
+                        InvalidateRect(GetDlgItem(hDlg, IDC_TRIM_TIMELINE), nullptr, FALSE);
+                    }
+                    catch (const winrt::hresult_error& e)
+                    {
+                        std::wstring msg = L"Failed to append video: ";
+                        msg += e.message().c_str();
+                        MessageBox(hDlg, msg.c_str(), L"Error", MB_OK | MB_ICONERROR);
+                    }
+                    catch (...)
+                    {
+                        MessageBox(hDlg, L"Failed to append video.", L"Error", MB_OK | MB_ICONERROR);
+                    }
+                }
+                else if (pData->isGif)
+                {
+                    // For GIF, append frames from the second file
+                    try
+                    {
+                        // Save current frame count for boundary tracking
+                        auto boundaryTime = pData->videoDuration;
+
+                        // Create a temporary data struct to load the new GIF frames
+                        TrimDialogData tempData;
+                        tempData.isGif = true;
+                        if (LoadGifFrames(appendPath, &tempData))
+                        {
+                            // Record clip boundary
+                            TrimDialogData::ClipBoundary boundary;
+                            boundary.time = boundaryTime;
+                            boundary.transition = transition;
+                            pData->clipBoundaries.push_back(boundary);
+
+                            // Offset new frames' start times and append them
+                            for (auto& frame : tempData.gifFrames)
+                            {
+                                frame.start = winrt::TimeSpan{ frame.start.count() + boundaryTime.count() };
+                                pData->gifFrames.push_back(std::move(frame));
+                            }
+                            // Don't let tempData clean up the bitmaps we moved
+                            tempData.gifFrames.clear();
+
+                            // Update total duration
+                            if (!pData->gifFrames.empty())
+                            {
+                                auto& lastFrame = pData->gifFrames.back();
+                                pData->videoDuration = winrt::TimeSpan{ lastFrame.start.count() + lastFrame.duration.count() };
+                            }
+                            pData->trimEnd = pData->videoDuration;
+                            pData->originalTrimEnd = pData->videoDuration;
+
+                            // Update UI
+                            UpdateDurationDisplay(hDlg, pData);
+                            UpdatePositionUI(hDlg, pData);
+                            InvalidateRect(GetDlgItem(hDlg, IDC_TRIM_TIMELINE), nullptr, FALSE);
+                        }
+                        else
+                        {
+                            MessageBox(hDlg, L"Failed to load GIF frames from the selected file.", L"Error", MB_OK | MB_ICONERROR);
+                        }
+                    }
+                    catch (...)
+                    {
+                        MessageBox(hDlg, L"Failed to append GIF.", L"Error", MB_OK | MB_ICONERROR);
+                    }
+                }
+
+                return TRUE;
+            }
+            break;
+        }
+
         case IDOK:
             pData = reinterpret_cast<TrimDialogData*>(GetWindowLongPtr(hDlg, DWLP_USER));
             StopPlayback(hDlg, pData);
@@ -5439,17 +5679,23 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                 bool isGif = pData->isGif;
                 auto trimStart = pData->trimStart;
                 auto trimEnd = pData->trimEnd;
+                bool hasMultipleClips = !isGif && pData->composition && pData->composition.Clips().Size() > 1;
+                auto composition = hasMultipleClips ? pData->composition : winrt::MediaComposition{ nullptr };
                 std::wstring savePathStr(savePath.get());
 
                 // Close the trim dialog immediately
                 EndDialog(hDlg, IDOK);
 
-                // Perform the trim after the dialog is closed
+                // Perform the trim/render after the dialog is closed
                 try
                 {
-                    auto trimOp = isGif
-                        ? TrimGifAsync(videoPath, trimStart, trimEnd)
-                        : TrimVideoAsync(videoPath, trimStart, trimEnd);
+                    winrt::IAsyncOperation<winrt::hstring> trimOp{ nullptr };
+                    if (hasMultipleClips)
+                        trimOp = RenderCompositionAsync(composition, trimStart, trimEnd);
+                    else if (isGif)
+                        trimOp = TrimGifAsync(videoPath, trimStart, trimEnd);
+                    else
+                        trimOp = TrimVideoAsync(videoPath, trimStart, trimEnd);
 
                     // Pump messages while waiting for async operation
                     while (trimOp.Status() == winrt::AsyncStatus::Started)
@@ -5546,6 +5792,74 @@ winrt::IAsyncOperation<winrt::hstring> VideoRecordingSession::TrimVideoAsync(
             filename, winrt::CreationCollisionOption::ReplaceExisting);
 
         // Render the composition to the output file with fast trimming (no re-encode)
+        auto renderResult = co_await composition.RenderToFileAsync(
+            outputFile, winrt::MediaTrimmingPreference::Fast);
+
+        if (renderResult == winrt::TranscodeFailureReason::None)
+        {
+            co_return winrt::hstring(outputFile.Path());
+        }
+        else
+        {
+            co_return winrt::hstring();
+        }
+    }
+    catch (...)
+    {
+        co_return winrt::hstring();
+    }
+}
+
+//----------------------------------------------------------------------------
+//
+// VideoRecordingSession::RenderCompositionAsync
+//
+// Renders a multi-clip composition (used when clips have been appended)
+//
+//----------------------------------------------------------------------------
+winrt::IAsyncOperation<winrt::hstring> VideoRecordingSession::RenderCompositionAsync(
+    winrt::MediaComposition composition,
+    winrt::TimeSpan trimTimeStart,
+    winrt::TimeSpan trimTimeEnd)
+{
+    try
+    {
+        // Apply trim to the composition by adjusting the first and last clips
+        auto clips = composition.Clips();
+        if (clips.Size() == 0)
+        {
+            co_return winrt::hstring();
+        }
+
+        // Apply trim start to the first clip
+        if (trimTimeStart.count() > 0)
+        {
+            auto firstClip = clips.GetAt(0);
+            auto currentTrimFromStart = firstClip.TrimTimeFromStart();
+            firstClip.TrimTimeFromStart(winrt::TimeSpan{ currentTrimFromStart.count() + trimTimeStart.count() });
+        }
+
+        // Apply trim end: trim from end of the last clip
+        auto totalDuration = composition.Duration();
+        if (trimTimeEnd < totalDuration)
+        {
+            auto lastClip = clips.GetAt(clips.Size() - 1);
+            auto trimFromEnd = winrt::TimeSpan{ totalDuration.count() - trimTimeEnd.count() };
+            auto currentTrimFromEnd = lastClip.TrimTimeFromEnd();
+            lastClip.TrimTimeFromEnd(winrt::TimeSpan{ currentTrimFromEnd.count() + trimFromEnd.count() });
+        }
+
+        // Create output file in temp folder
+        auto tempFolder = co_await winrt::StorageFolder::GetFolderFromPathAsync(
+            std::filesystem::temp_directory_path().wstring());
+        auto zoomitFolder = co_await tempFolder.CreateFolderAsync(
+            L"ZoomIt", winrt::CreationCollisionOption::OpenIfExists);
+
+        std::wstring filename = L"zoomit_composed_" +
+            std::to_wstring(GetTickCount64()) + L".mp4";
+        auto outputFile = co_await zoomitFolder.CreateFileAsync(
+            filename, winrt::CreationCollisionOption::ReplaceExisting);
+
         auto renderResult = co_await composition.RenderToFileAsync(
             outputFile, winrt::MediaTrimmingPreference::Fast);
 

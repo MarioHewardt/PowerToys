@@ -45,6 +45,14 @@ public:
         const std::wstring& originalVideoPath,
         std::wstring& trimmedVideoPath);
 
+    // Transition type for connecting appended clips
+    enum class AppendTransition
+    {
+        None,           // Hard cut
+        FadeToBlack,    // Insert solid black frame
+        FadeToWhite,    // Insert solid white frame
+    };
+
     struct TrimDialogData
     {
         struct GifFrame
@@ -56,7 +64,15 @@ public:
             UINT height{ 0 };
         };
 
+        // Tracks a boundary between appended clips for timeline visualization
+        struct ClipBoundary
+        {
+            winrt::Windows::Foundation::TimeSpan time{ 0 };     // Absolute time in composition
+            AppendTransition transition{ AppendTransition::None };
+        };
+
         std::wstring videoPath;
+        std::vector<ClipBoundary> clipBoundaries;   // Boundaries between appended clips
         winrt::Windows::Foundation::TimeSpan videoDuration{ 0 };
         winrt::Windows::Foundation::TimeSpan trimStart{ 0 };
         winrt::Windows::Foundation::TimeSpan trimEnd{ 0 };
@@ -171,6 +187,10 @@ private:
 
     static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> TrimVideoAsync(
         const std::wstring& sourceVideoPath,
+        winrt::Windows::Foundation::TimeSpan trimTimeStart,
+        winrt::Windows::Foundation::TimeSpan trimTimeEnd);
+    static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> RenderCompositionAsync(
+        winrt::Windows::Media::Editing::MediaComposition composition,
         winrt::Windows::Foundation::TimeSpan trimTimeStart,
         winrt::Windows::Foundation::TimeSpan trimTimeEnd);
     static winrt::Windows::Foundation::IAsyncOperation<winrt::hstring> TrimGifAsync(
