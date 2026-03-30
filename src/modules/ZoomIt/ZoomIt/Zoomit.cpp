@@ -11103,14 +11103,31 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             if( !g_fullScreenWorkaround ) {
 
                 pSetLayeredWindowAttributes( hWnd, 0, 255, LWA_ALPHA );
-                SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0,
-                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
 
-                // Keep the webcam preview above the live zoom window.
+                // Use DeferWindowPos to set both the zoom and the webcam
+                // preview z-order atomically.  Two separate SetWindowPos
+                // calls create a brief intermediate state where the zoom
+                // is above the preview, causing visible flicker.
                 if( g_WebcamPreview.IsActive() )
                 {
-                    SetWindowPos( g_WebcamPreview.GetHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
-                                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+                    HDWP hdwp = BeginDeferWindowPos( 2 );
+                    if( hdwp )
+                    {
+                        hdwp = DeferWindowPos( hdwp, hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                                               SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+                        if( hdwp )
+                        {
+                            hdwp = DeferWindowPos( hdwp, g_WebcamPreview.GetHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
+                                                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+                        }
+                        if( hdwp )
+                            EndDeferWindowPos( hdwp );
+                    }
+                }
+                else
+                {
+                    SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
                 }
 
                 OutputDebug(L"LIVEZOOM RECLAIM\n");
