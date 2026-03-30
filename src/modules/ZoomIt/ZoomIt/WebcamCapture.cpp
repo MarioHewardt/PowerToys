@@ -440,15 +440,44 @@ void WebcamCapture::CaptureThread()
             UINT32* dstPixels = reinterpret_cast<UINT32*>( m_scaledPixels.data() );
             const UINT srcW32 = m_camWidth;  // stride in uint32 units
 
+            // For FullScreen mode, crop the camera feed to match the
+            // output aspect ratio (crop-to-fill) so nothing is stretched.
+            // For other modes the full camera frame is used.
+            UINT srcCropX = 0, srcCropY = 0;
+            UINT srcCropW = m_camWidth, srcCropH = m_camHeight;
+
+            if( m_size == FullScreen && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
+            {
+                // Compare aspect ratios: camera vs output.
+                // Scale camera so it fills the output, then crop excess.
+                double camAspect = static_cast<double>( m_camWidth ) / m_camHeight;
+                double outAspect = static_cast<double>( ovW ) / ovH;
+
+                if( camAspect > outAspect )
+                {
+                    // Camera is wider — crop sides.
+                    srcCropH = m_camHeight;
+                    srcCropW = static_cast<UINT>( m_camHeight * outAspect + 0.5 );
+                    srcCropX = ( m_camWidth - srcCropW ) / 2;
+                }
+                else
+                {
+                    // Camera is taller — crop top/bottom.
+                    srcCropW = m_camWidth;
+                    srcCropH = static_cast<UINT>( m_camWidth / outAspect + 0.5 );
+                    srcCropY = ( m_camHeight - srcCropH ) / 2;
+                }
+            }
+
             for( UINT y = 0; y < ovH; y++ )
             {
-                const UINT srcY = y * m_camHeight / ovH;
+                const UINT srcY = srcCropY + y * srcCropH / ovH;
                 const UINT32* srcRow = srcPixels + static_cast<size_t>( srcY ) * srcW32;
                 UINT32* dstRow = dstPixels + static_cast<size_t>( y ) * ovW;
 
                 for( UINT x = 0; x < ovW; x++ )
                 {
-                    const UINT srcX = x * m_camWidth / ovW;
+                    const UINT srcX = srcCropX + x * srcCropW / ovW;
                     dstRow[x] = srcRow[srcX] | 0xFF000000u;
                 }
             }
@@ -519,6 +548,14 @@ void WebcamCapture::CaptureThread()
 //----------------------------------------------------------------------------
 RECT WebcamCapture::ComputeDestRect() const
 {
+    // Full screen: overlay covers the entire output area (no edges).
+    if( m_size == FullScreen )
+    {
+        return RECT{ 0, 0,
+                     static_cast<LONG>( m_outputWidth ),
+                     static_cast<LONG>( m_outputHeight ) };
+    }
+
     // Size percentages: Small=15%, Medium=25%, Large=33%, XLarge=50%.
     static const int sizePercent[] = { 15, 25, 33, 50 };
     const int pct = sizePercent[min( static_cast<int>( m_size ), 3 )];
