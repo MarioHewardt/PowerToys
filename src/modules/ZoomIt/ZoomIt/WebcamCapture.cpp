@@ -243,6 +243,8 @@ void WebcamCapture::Stop()
     {
         std::lock_guard<std::mutex> lock( m_frameLock );
         m_pendingPixels.clear();
+        m_pendingW = 0;
+        m_pendingH = 0;
         m_newFrameReady = false;
     }
     m_overlayTex = nullptr;
@@ -546,6 +548,8 @@ void WebcamCapture::CaptureThread()
 #endif
 
                 m_pendingPixels.swap( m_scaledPixels );
+                m_pendingW = ovW;
+                m_pendingH = ovH;
                 m_newFrameReady = true;
                 frameCount++;
 
@@ -686,20 +690,26 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
     // If the lock is contended, just reuse the previous cached texture.
     if( m_frameLock.try_lock() )
     {
-        if( m_newFrameReady && !m_pendingPixels.empty() && m_overlayW > 0 && m_overlayH > 0 )
+        if( m_newFrameReady && !m_pendingPixels.empty() && m_pendingW > 0 && m_pendingH > 0 )
         {
 #if _DEBUG
             m_uploadCount++;
 #endif
 
+            // Use the dimensions the pixels were actually produced at,
+            // NOT m_overlayW/m_overlayH which may have been changed by
+            // SetDestRectAndSize since the capture thread produced this frame.
+            const UINT pixW = m_pendingW;
+            const UINT pixH = m_pendingH;
+
             // Recreate the texture if dimensions changed.
-            if( m_texW != m_overlayW || m_texH != m_overlayH )
+            if( m_texW != pixW || m_texH != pixH )
             {
                 m_overlayTex = nullptr;
 
                 D3D11_TEXTURE2D_DESC texDesc = {};
-                texDesc.Width = m_overlayW;
-                texDesc.Height = m_overlayH;
+                texDesc.Width = pixW;
+                texDesc.Height = pixH;
                 texDesc.MipLevels = 1;
                 texDesc.ArraySize = 1;
                 texDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -714,8 +724,8 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
                     m_frameLock.unlock();
                     return false;
                 }
-                m_texW = m_overlayW;
-                m_texH = m_overlayH;
+                m_texW = pixW;
+                m_texH = pixH;
             }
 
             // Upload new pixels.  UpdateSubresource + CopySubresourceRegion
@@ -723,7 +733,7 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
             // so there is no read-write hazard.
             m_d3dContext->UpdateSubresource(
                 m_overlayTex.get(), 0, nullptr,
-                m_pendingPixels.data(), m_overlayW * 4, 0 );
+                m_pendingPixels.data(), pixW * 4, 0 );
 
             // Keep a CPU copy for alpha-blended compositing (shaped overlays).
             if( m_shape != Square )
@@ -763,8 +773,8 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
         UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
 
         D3D11_BOX srcBox = {};
-        srcBox.right = min( m_overlayW, targetDesc.Width - destX );
-        srcBox.bottom = min( m_overlayH, targetDesc.Height - destY );
+        srcBox.right = min( m_texW, targetDesc.Width - destX );
+        srcBox.bottom = min( m_texH, targetDesc.Height - destY );
         srcBox.back = 1;
 
         m_d3dContext->CopySubresourceRegion(
@@ -782,8 +792,8 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 
         UINT destX = static_cast<UINT>( max( 0L, m_destRect.left ) );
         UINT destY = static_cast<UINT>( max( 0L, m_destRect.top ) );
-        UINT copyW = min( m_overlayW, targetDesc.Width - destX );
-        UINT copyH = min( m_overlayH, targetDesc.Height - destY );
+        UINT copyW = min( m_texW, targetDesc.Width - destX );
+        UINT copyH = min( m_texH, targetDesc.Height - destY );
 
         if( copyW == 0 || copyH == 0 )
             return false;
@@ -836,7 +846,7 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
                 {
                     UINT32* dstRow = reinterpret_cast<UINT32*>(
                         static_cast<BYTE*>( mapped.pData ) + row * mapped.RowPitch );
-                    const UINT32* srcRow = overlayPixels + row * m_overlayW;
+                    const UINT32* srcRow = overlayPixels + row * m_texW;
 
                     for( UINT col = 0; col < copyW; col++ )
                     {
@@ -884,11 +894,11 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 bool WebcamCapture::GetLatestPixels( std::vector<BYTE>& outPixels, UINT& outW, UINT& outH )
 {
     std::lock_guard<std::mutex> lock( m_frameLock );
-    if( m_pendingPixels.empty() || m_overlayW == 0 || m_overlayH == 0 )
+    if( m_pendingPixels.empty() || m_pendingW == 0 || m_pendingH == 0 )
         return false;
 
     outPixels = m_pendingPixels;
-    outW = m_overlayW;
-    outH = m_overlayH;
+    outW = m_pendingW;
+    outH = m_pendingH;
     return true;
 }

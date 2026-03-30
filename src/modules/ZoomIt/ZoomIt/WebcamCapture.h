@@ -72,6 +72,17 @@ public:
     // Thread-safe: the encoder reads m_destRect from the encoder thread.
     void SetDestRect( RECT rect ) { m_destRect = rect; }
 
+    // Update destination rect AND overlay pixel dimensions for resize.
+    // Must acquire m_frameLock because the capture thread and
+    // GetLatestPixels both read m_overlayW / m_overlayH under that lock.
+    void SetDestRectAndSize( RECT rect )
+    {
+        std::lock_guard<std::mutex> lock( m_frameLock );
+        m_destRect = rect;
+        m_overlayW = static_cast<UINT>( max( 1L, rect.right - rect.left ) );
+        m_overlayH = static_cast<UINT>( max( 1L, rect.bottom - rect.top ) );
+    }
+
     // Return the recording output dimensions (for screen-coordinate mapping).
     UINT GetOutputWidth()  const { return m_outputWidth; }
     UINT GetOutputHeight() const { return m_outputHeight; }
@@ -91,6 +102,8 @@ private:
     // CompositeOnto consumes them and uploads to a cached GPU texture.
     std::mutex                          m_frameLock;
     std::vector<BYTE>                   m_pendingPixels;   // new frame waiting
+    UINT                                m_pendingW = 0;    // dims of m_pendingPixels
+    UINT                                m_pendingH = 0;
     bool                                m_newFrameReady = false;
 
     // Cached GPU texture (owned by CompositeOnto's thread only).

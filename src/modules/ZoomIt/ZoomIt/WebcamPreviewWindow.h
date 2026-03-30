@@ -39,7 +39,20 @@ public:
     // Returns true if the preview window is active.
     bool IsActive() const { return m_hwnd != nullptr; }
 
+    // Return the HWND so the live zoom timer can keep us above it.
+    HWND GetHwnd() const { return m_hwnd; }
+
 private:
+    // Edge flags for resize hit-testing (combinable for corners).
+    enum ResizeEdge : UINT
+    {
+        EdgeNone   = 0,
+        EdgeLeft   = 1,
+        EdgeTop    = 2,
+        EdgeRight  = 4,
+        EdgeBottom = 8,
+    };
+
     static LRESULT CALLBACK WndProc( HWND, UINT, WPARAM, LPARAM );
     void OnPaint();
     void OnTimer();
@@ -47,10 +60,16 @@ private:
     void OnLButtonDown( int x, int y );
     void OnMouseMove( int x, int y );
     void OnLButtonUp();
-    void SyncOverlayPosition();  // Push preview position to WebcamCapture
+    void SyncOverlayPosition();  // Push preview position/size to WebcamCapture
+
+    UINT  HitTestEdge( int x, int y ) const;
+    LPCTSTR CursorForEdge( UINT edge ) const;
+    static void ForceEdgeAlpha( void* pBits, int width, int height, int grab );
 
     static constexpr UINT_PTR TIMER_ID = 1;
     static constexpr UINT     TIMER_MS = 33;   // ~30 fps refresh
+    static constexpr int      EDGE_GRAB = 10;  // pixels from edge for resize grab
+    static constexpr int      MIN_SIZE  = 40;  // minimum window dimension in pixels
 
     HWND             m_hwnd = nullptr;
     WebcamCapture*   m_capture = nullptr;
@@ -66,4 +85,11 @@ private:
     // Drag state.
     bool              m_dragging = false;
     POINT             m_dragOffset = {};      // cursor offset from window topleft
+
+    // Resize state.
+    bool              m_resizing = false;
+    UINT              m_resizeEdge = EdgeNone; // which edge(s) are being dragged
+    RECT              m_resizeStartRect = {};  // window rect at resize start (screen coords)
+    POINT             m_resizeStartPt = {};    // cursor at resize start (screen coords)
+    double            m_aspectRatio = 1.0;     // width/height aspect ratio to preserve
 };

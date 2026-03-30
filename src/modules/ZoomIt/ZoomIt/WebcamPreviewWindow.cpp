@@ -144,16 +144,24 @@ void WebcamPreviewWindow::OnTimer()
         return;
 
     // Re-assert topmost Z-order so the preview stays above the live zoom
-    // magnification window during drawing mode.  SWP_NOACTIVATE keeps
-    // keyboard focus where it belongs.
+    // magnification window during drawing mode.  The live zoom timer also
+    // pushes us on top (see Zoomit.cpp), but we reinforce here as a
+    // belt-and-suspenders measure.
     SetWindowPos( m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                   SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
 
     UINT w = 0, h = 0;
-    if( m_capture->GetLatestPixels( m_pixels, w, h ) )
+    if( !m_capture->GetLatestPixels( m_pixels, w, h ) )
+    {
+        // No frame available yet — keep waiting.
+        return;
+    }
+
     {
         if( w != m_pixW || h != m_pixH )
         {
+            OutputDebug( L"[WebcamPreview] Pixel dims changed: %ux%u -> %ux%u\n",
+                         m_pixW, m_pixH, w, h );
             m_pixW = w;
             m_pixH = h;
         }
@@ -224,6 +232,9 @@ void WebcamPreviewWindow::OnTimer()
                 if( static_cast<UINT>( clientW ) != m_pixW ||
                     static_cast<UINT>( clientH ) != m_pixH )
                 {
+                    OutputDebug( L"[WebcamPreview] StretchBlt path: pix=%ux%u wnd=%dx%d\n",
+                                 m_pixW, m_pixH, clientW, clientH );
+
                     HDC hdcStretch = CreateCompatibleDC( hdcScreen );
                     BITMAPINFO bmiStretch = bmi;
                     bmiStretch.bmiHeader.biWidth = clientW;
@@ -237,8 +248,13 @@ void WebcamPreviewWindow::OnTimer()
                         SetStretchBltMode( hdcStretch, HALFTONE );
                         StretchBlt( hdcStretch, 0, 0, clientW, clientH,
                                     hdcMem, 0, 0, m_pixW, m_pixH, SRCCOPY );
-                        UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
-                                             hdcStretch, &ptSrc, 0, &blend, ULW_ALPHA );
+                        ForceEdgeAlpha( pvStretch, clientW, clientH, EDGE_GRAB );
+                        if( !UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
+                                             hdcStretch, &ptSrc, 0, &blend, ULW_ALPHA ) )
+                        {
+                            OutputDebug( L"[WebcamPreview] UpdateLayeredWindow FAILED (stretch) err=%u\n",
+                                         GetLastError() );
+                        }
                         SelectObject( hdcStretch, hOldStretch );
                         DeleteObject( hBmpStretch );
                     }
@@ -246,8 +262,13 @@ void WebcamPreviewWindow::OnTimer()
                 }
                 else
                 {
-                    UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
-                                         hdcMem, &ptSrc, 0, &blend, ULW_ALPHA );
+                    ForceEdgeAlpha( pvBits, clientW, clientH, EDGE_GRAB );
+                    if( !UpdateLayeredWindow( m_hwnd, hdcScreen, &ptDst, &sizeWnd,
+                                         hdcMem, &ptSrc, 0, &blend, ULW_ALPHA ) )
+                    {
+                        OutputDebug( L"[WebcamPreview] UpdateLayeredWindow FAILED err=%u\n",
+                                     GetLastError() );
+                    }
                 }
 
                 SelectObject( hdcMem, hOld );
@@ -272,16 +293,144 @@ void WebcamPreviewWindow::OnPaint()
 }
 
 //----------------------------------------------------------------------------
-// WebcamPreviewWindow::WndProc
+// WebcamPreviewWindow::ForceEdgeAlpha
+//
+// For WS_EX_LAYERED windows rendered via UpdateLayeredWindow(ULW_ALPHA),
+// the system uses the alpha channel for hit-testing — pixels with
+// alpha == 0 let mouse messages pass through to the window below.
+// To ensure the resize grab zones work even where the webcam image is
+// transparent (circle / rounded-rect masking), we force a minimum
+// alpha of 1 on all pixels within the grab margin.  Alpha 1/255 is
+// imperceptible but sufficient for hit-testing.
+//
+// NOTE: SetWindowRgn cannot be used with UpdateLayeredWindow — MSDN
+// documents the combination as undefined behaviour.
 //----------------------------------------------------------------------------
+void WebcamPreviewWindow::ForceEdgeAlpha( void* pBits, int width, int height, int grab )
+{
+    UINT32* pixels = static_cast<UINT32*>( pBits );
+    int grabX = min( grab, width );
+    int grabY = min( grab, height );
+
+    // Top edge rows.
+    for( int y = 0; y < grabY; y++ )
+        for( int x = 0; x < width; x++ )
+        {
+            UINT32& px = pixels[y * width + x];
+            if( ( px >> 24 ) == 0 )
+                px = 0x01000000;  // alpha=1, premultiplied black
+        }
+
+    // Bottom edge rows.
+    for( int y = max( grabY, height - grab ); y < height; y++ )
+        for( int x = 0; x < width; x++ )
+        {
+            UINT32& px = pixels[y * width + x];
+            if( ( px >> 24 ) == 0 )
+                px = 0x01000000;
+        }
+
+    // Left and right columns in the middle rows.
+    for( int y = grabY; y < height - grab; y++ )
+    {
+        for( int x = 0; x < grabX; x++ )
+        {
+            UINT32& px = pixels[y * width + x];
+            if( ( px >> 24 ) == 0 )
+                px = 0x01000000;
+        }
+        for( int x = max( grabX, width - grab ); x < width; x++ )
+        {
+            UINT32& px = pixels[y * width + x];
+            if( ( px >> 24 ) == 0 )
+                px = 0x01000000;
+        }
+    }
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::HitTestEdge
+//
+// Returns a combination of ResizeEdge flags indicating which edge(s)
+// the given client-coordinate point is near, or EdgeNone if the cursor
+// is in the interior (drag zone).
+//----------------------------------------------------------------------------
+UINT WebcamPreviewWindow::HitTestEdge( int x, int y ) const
+{
+    RECT rc;
+    GetClientRect( m_hwnd, &rc );
+
+    UINT edge = EdgeNone;
+    if( x <= EDGE_GRAB )                    edge |= EdgeLeft;
+    if( x >= rc.right - EDGE_GRAB )         edge |= EdgeRight;
+    if( y <= EDGE_GRAB )                    edge |= EdgeTop;
+    if( y >= rc.bottom - EDGE_GRAB )        edge |= EdgeBottom;
+    return edge;
+}
+
+//----------------------------------------------------------------------------
+// WebcamPreviewWindow::CursorForEdge
+//
+// Returns the system cursor ID appropriate for the given resize edge(s).
+//----------------------------------------------------------------------------
+LPCTSTR WebcamPreviewWindow::CursorForEdge( UINT edge ) const
+{
+    switch( edge )
+    {
+    case EdgeLeft:
+    case EdgeRight:
+        return IDC_SIZEWE;
+    case EdgeTop:
+    case EdgeBottom:
+        return IDC_SIZENS;
+    case EdgeLeft  | EdgeTop:
+    case EdgeRight | EdgeBottom:
+        return IDC_SIZENWSE;
+    case EdgeRight | EdgeTop:
+    case EdgeLeft  | EdgeBottom:
+        return IDC_SIZENESW;
+    default:
+        return IDC_SIZEALL;   // interior = move
+    }
+}
+
 //----------------------------------------------------------------------------
 // WebcamPreviewWindow::OnLButtonDown
 //----------------------------------------------------------------------------
 void WebcamPreviewWindow::OnLButtonDown( int x, int y )
 {
-    m_dragging = true;
-    m_dragOffset = { x, y };
-    SetCapture( m_hwnd );
+    // Bring the window to the very top of the topmost band on click so
+    // it can't get stuck behind another topmost window (e.g. the live zoom).
+    SetWindowPos( m_hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+
+    UINT edge = HitTestEdge( x, y );
+    if( edge != EdgeNone )
+    {
+        // Start resizing.
+        m_resizing = true;
+        m_resizeEdge = edge;
+
+        GetWindowRect( m_hwnd, &m_resizeStartRect );
+
+        POINT screenPt = { x, y };
+        ClientToScreen( m_hwnd, &screenPt );
+        m_resizeStartPt = screenPt;
+
+        // Capture the current aspect ratio.
+        int w = m_resizeStartRect.right - m_resizeStartRect.left;
+        int h = m_resizeStartRect.bottom - m_resizeStartRect.top;
+        m_aspectRatio = ( h > 0 ) ? static_cast<double>( w ) / h : 1.0;
+
+        SetCapture( m_hwnd );
+    }
+    else
+    {
+        // Start dragging.
+        m_dragging = true;
+        m_dragOffset = { x, y };
+        SetCapture( m_hwnd );
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -289,6 +438,123 @@ void WebcamPreviewWindow::OnLButtonDown( int x, int y )
 //----------------------------------------------------------------------------
 void WebcamPreviewWindow::OnMouseMove( int x, int y )
 {
+    if( m_resizing )
+    {
+        POINT cursor = { x, y };
+        ClientToScreen( m_hwnd, &cursor );
+
+        int dx = cursor.x - m_resizeStartPt.x;
+        int dy = cursor.y - m_resizeStartPt.y;
+
+        RECT r = m_resizeStartRect;
+
+        // Apply the delta to the grabbed edge(s).
+        if( m_resizeEdge & EdgeLeft )   r.left   += dx;
+        if( m_resizeEdge & EdgeRight )  r.right  += dx;
+        if( m_resizeEdge & EdgeTop )    r.top    += dy;
+        if( m_resizeEdge & EdgeBottom ) r.bottom += dy;
+
+        // Enforce minimum size before aspect-ratio correction.
+        int newW = r.right - r.left;
+        int newH = r.bottom - r.top;
+        if( newW < MIN_SIZE ) newW = MIN_SIZE;
+        if( newH < MIN_SIZE ) newH = MIN_SIZE;
+
+        // Preserve aspect ratio.  The "dominant" axis is whichever the
+        // user is dragging; adjust the other axis to match.
+        bool horzEdge = ( m_resizeEdge & ( EdgeLeft | EdgeRight ) ) != 0;
+        bool vertEdge = ( m_resizeEdge & ( EdgeTop | EdgeBottom ) ) != 0;
+
+        if( horzEdge && !vertEdge )
+        {
+            // Horizontal edge only — height follows width.
+            newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
+            if( newH < MIN_SIZE ) { newH = MIN_SIZE; newW = static_cast<int>( newH * m_aspectRatio + 0.5 ); }
+        }
+        else if( vertEdge && !horzEdge )
+        {
+            // Vertical edge only — width follows height.
+            newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
+            if( newW < MIN_SIZE ) { newW = MIN_SIZE; newH = static_cast<int>( newW / m_aspectRatio + 0.5 ); }
+        }
+        else
+        {
+            // Corner drag — pick the axis with the larger delta.
+            if( abs( dx ) >= abs( dy ) )
+            {
+                newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
+                if( newH < MIN_SIZE ) { newH = MIN_SIZE; newW = static_cast<int>( newH * m_aspectRatio + 0.5 ); }
+            }
+            else
+            {
+                newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
+                if( newW < MIN_SIZE ) { newW = MIN_SIZE; newH = static_cast<int>( newW / m_aspectRatio + 0.5 ); }
+            }
+        }
+
+        // Anchor the non-moving edges.
+        if( m_resizeEdge & EdgeLeft )
+            r.left = r.right - newW;
+        else
+            r.right = r.left + newW;
+
+        if( m_resizeEdge & EdgeTop )
+            r.top = r.bottom - newH;
+        else
+            r.bottom = r.top + newH;
+
+        // Clamp to the recording region so the overlay can't extend past it.
+        if( r.left < m_screenRect.left )
+        {
+            r.left = m_screenRect.left;
+            newW = r.right - r.left;
+            newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
+            if( m_resizeEdge & EdgeTop )
+                r.top = r.bottom - newH;
+            else
+                r.bottom = r.top + newH;
+        }
+        if( r.top < m_screenRect.top )
+        {
+            r.top = m_screenRect.top;
+            newH = r.bottom - r.top;
+            newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
+            if( m_resizeEdge & EdgeLeft )
+                r.left = r.right - newW;
+            else
+                r.right = r.left + newW;
+        }
+        if( r.right > m_screenRect.right )
+        {
+            r.right = m_screenRect.right;
+            newW = r.right - r.left;
+            newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
+            if( m_resizeEdge & EdgeTop )
+                r.top = r.bottom - newH;
+            else
+                r.bottom = r.top + newH;
+        }
+        if( r.bottom > m_screenRect.bottom )
+        {
+            r.bottom = m_screenRect.bottom;
+            newH = r.bottom - r.top;
+            newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
+            if( m_resizeEdge & EdgeLeft )
+                r.left = r.right - newW;
+            else
+                r.right = r.left + newW;
+        }
+
+        // Reassert HWND_TOPMOST during resize so the live zoom window
+        // (which also uses HWND_TOPMOST every 20 ms) can't push us behind.
+        SetWindowPos( m_hwnd, HWND_TOPMOST, r.left, r.top,
+                      r.right - r.left, r.bottom - r.top,
+                      SWP_NOACTIVATE );
+
+        SyncOverlayPosition();
+        return;
+    }
+
     if( !m_dragging )
         return;
 
@@ -314,8 +580,10 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
     if( newY + wndH > m_screenRect.bottom )
         newY = m_screenRect.bottom - wndH;
 
-    SetWindowPos( m_hwnd, nullptr, newX, newY, 0, 0,
-                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE );
+    // Reassert HWND_TOPMOST during drag so the live zoom window can't
+    // push us behind it mid-drag.
+    SetWindowPos( m_hwnd, HWND_TOPMOST, newX, newY, 0, 0,
+                  SWP_NOSIZE | SWP_NOACTIVATE );
 
     // Update the recording overlay position to match.
     SyncOverlayPosition();
@@ -332,12 +600,19 @@ void WebcamPreviewWindow::OnLButtonUp()
         ReleaseCapture();
         SyncOverlayPosition();
     }
+    if( m_resizing )
+    {
+        m_resizing = false;
+        m_resizeEdge = EdgeNone;
+        ReleaseCapture();
+        SyncOverlayPosition();
+    }
 }
 
 //----------------------------------------------------------------------------
 // WebcamPreviewWindow::SyncOverlayPosition
 //
-// Maps the preview window's current screen position back to
+// Maps the preview window's current screen position and size back to
 // recording-output coordinates and updates WebcamCapture's destRect.
 //----------------------------------------------------------------------------
 void WebcamPreviewWindow::SyncOverlayPosition()
@@ -369,7 +644,21 @@ void WebcamPreviewWindow::SyncOverlayPosition()
     if( dest.right > outW )  { dest.left -= (dest.right - outW); dest.right = outW; }
     if( dest.bottom > outH ) { dest.top -= (dest.bottom - outH); dest.bottom = outH; }
 
-    m_capture->SetDestRect( dest );
+    if( m_resizing )
+    {
+        // Resize: update both position and overlay pixel dimensions so
+        // the capture thread pre-scales to the new size.
+        m_capture->SetDestRectAndSize( dest );
+    }
+    else
+    {
+        // Drag (position-only): do NOT touch m_overlayW / m_overlayH.
+        // Changing them racily can cause GetLatestPixels to return
+        // dimensions that don't match the pixel buffer, which pushes
+        // us into the StretchBlt path where GDI may zero the alpha
+        // channel and make the window invisible.
+        m_capture->SetDestRect( dest );
+    }
 }
 
 //----------------------------------------------------------------------------
@@ -421,10 +710,30 @@ LRESULT CALLBACK WebcamPreviewWindow::WndProc( HWND hwnd, UINT msg, WPARAM wPara
             self->OnLButtonUp();
             return 0;
 
+        case WM_CAPTURECHANGED:
+            // Another window stole capture — cancel any in-progress
+            // drag or resize so we don't get stuck in a bad state.
+            if( self->m_dragging )
+            {
+                OutputDebug( L"[WebcamPreview] Capture lost during drag\n" );
+                self->m_dragging = false;
+            }
+            if( self->m_resizing )
+            {
+                OutputDebug( L"[WebcamPreview] Capture lost during resize\n" );
+                self->m_resizing = false;
+                self->m_resizeEdge = EdgeNone;
+            }
+            return 0;
+
         case WM_SETCURSOR:
             if( LOWORD( lParam ) == HTCLIENT )
             {
-                SetCursor( LoadCursor( nullptr, IDC_SIZEALL ) );
+                POINT pt;
+                GetCursorPos( &pt );
+                ScreenToClient( hwnd, &pt );
+                UINT edge = self->HitTestEdge( pt.x, pt.y );
+                SetCursor( LoadCursor( nullptr, self->CursorForEdge( edge ) ) );
                 return TRUE;
             }
             break;

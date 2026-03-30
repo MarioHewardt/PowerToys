@@ -11106,6 +11106,13 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0,
                     SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
 
+                // Keep the webcam preview above the live zoom window.
+                if( g_WebcamPreview.IsActive() )
+                {
+                    SetWindowPos( g_WebcamPreview.GetHwnd(), HWND_TOPMOST, 0, 0, 0, 0,
+                                  SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE );
+                }
+
                 OutputDebug(L"LIVEZOOM RECLAIM\n");
             }
 
