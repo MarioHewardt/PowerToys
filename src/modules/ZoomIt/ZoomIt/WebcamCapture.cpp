@@ -630,25 +630,35 @@ RECT WebcamCapture::ComputeDestRect() const
     if( overlayH > static_cast<int>( m_outputHeight ) - margin * 2 )
         overlayH = static_cast<int>( m_outputHeight ) - margin * 2;
 
+    // For circle shapes, the visible content is inscribed in the bounding
+    // rect.  Offset the position so the circle itself sits at the corner
+    // margin, not the bounding box.
+    int hInset = 0, vInset = 0;
+    if( m_shape == Circle )
+    {
+        hInset = max( 0, overlayW - overlayH ) / 2;
+        vInset = max( 0, overlayH - overlayW ) / 2;
+    }
+
     RECT dst = {};
     switch( m_position )
     {
     case TopLeft:
-        dst.left = margin;
-        dst.top = margin;
+        dst.left = margin - hInset;
+        dst.top = margin - vInset;
         break;
     case TopRight:
-        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
-        dst.top = margin;
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin + hInset;
+        dst.top = margin - vInset;
         break;
     case BottomLeft:
-        dst.left = margin;
-        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
+        dst.left = margin - hInset;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin + vInset;
         break;
     case BottomRight:
     default:
-        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
-        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin + hInset;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin + vInset;
         break;
     }
     dst.right = dst.left + overlayW;

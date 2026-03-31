@@ -8547,6 +8547,13 @@ LRESULT APIENTRY MainWndProc(
     case WM_KILLFOCUS:
         if( ( g_RecordCropping == FALSE ) && g_Zoomed && !g_bSaveInProgress ) {
 
+            // Don't exit zoom when focus moves to the webcam overlay
+            if( g_WebcamPreview.IsActive() &&
+                reinterpret_cast<HWND>( wParam ) == g_WebcamPreview.GetHwnd() )
+            {
+                break;
+            }
+
             // Turn off zoom if not in liveDraw
             DWORD layeringFlag;
             GetLayeredWindowAttributes(hWnd, NULL, NULL, &layeringFlag);

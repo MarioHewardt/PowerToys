@@ -586,19 +586,11 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
         else
             r.bottom = r.top + newH;
 
-        // For circle shapes, allow the bounding rect to extend past the
-        // screen edge by the circle's inset so the circle itself touches.
-        int hInset = 0, vInset = 0;
-        if( m_capture && m_capture->GetShape() == WebcamCapture::Circle )
+        // During resize, keep the full bounding rect within the
+        // recording region so the webcam image never extends beyond it.
+        if( r.left < m_screenRect.left )
         {
-            hInset = max( 0, newW - newH ) / 2;
-            vInset = max( 0, newH - newW ) / 2;
-        }
-
-        // Clamp to the recording region (using circle extents for circles).
-        if( r.left < m_screenRect.left - hInset )
-        {
-            r.left = m_screenRect.left - hInset;
+            r.left = m_screenRect.left;
             newW = r.right - r.left;
             newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
             if( m_resizeEdge & EdgeTop )
@@ -606,9 +598,9 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
             else
                 r.bottom = r.top + newH;
         }
-        if( r.top < m_screenRect.top - vInset )
+        if( r.top < m_screenRect.top )
         {
-            r.top = m_screenRect.top - vInset;
+            r.top = m_screenRect.top;
             newH = r.bottom - r.top;
             newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
             if( m_resizeEdge & EdgeLeft )
@@ -616,9 +608,9 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
             else
                 r.right = r.left + newW;
         }
-        if( r.right > m_screenRect.right + hInset )
+        if( r.right > m_screenRect.right )
         {
-            r.right = m_screenRect.right + hInset;
+            r.right = m_screenRect.right;
             newW = r.right - r.left;
             newH = static_cast<int>( newW / m_aspectRatio + 0.5 );
             if( m_resizeEdge & EdgeTop )
@@ -626,9 +618,9 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
             else
                 r.bottom = r.top + newH;
         }
-        if( r.bottom > m_screenRect.bottom + vInset )
+        if( r.bottom > m_screenRect.bottom )
         {
-            r.bottom = m_screenRect.bottom + vInset;
+            r.bottom = m_screenRect.bottom;
             newH = r.bottom - r.top;
             newW = static_cast<int>( newH * m_aspectRatio + 0.5 );
             if( m_resizeEdge & EdgeLeft )
@@ -740,19 +732,21 @@ void WebcamPreviewWindow::SyncOverlayPosition()
     dest.right  = MulDiv( wndRect.right  - m_screenRect.left, outW, screenW );
     dest.bottom = MulDiv( wndRect.bottom - m_screenRect.top,  outH, screenH );
 
-    // For circle shapes, the inscribed circle doesn't reach the edges
-    // of a non-square bounding rect.  Allow the dest rect to extend past
-    // output bounds by the circle inset so the circle touches the edge.
+    // For circle shapes during drag, the inscribed circle doesn't reach
+    // the edges of a non-square bounding rect.  Allow the dest rect to
+    // extend past output bounds by the circle inset so the circle touches
+    // the edge.  During resize, keep the bounding rect strictly within
+    // the output bounds.
     int destW = dest.right - dest.left;
     int destH = dest.bottom - dest.top;
     int hInset = 0, vInset = 0;
-    if( m_capture && m_capture->GetShape() == WebcamCapture::Circle )
+    if( !m_resizing && m_capture && m_capture->GetShape() == WebcamCapture::Circle )
     {
         hInset = max( 0, destW - destH ) / 2;
         vInset = max( 0, destH - destW ) / 2;
     }
 
-    // Clamp to output bounds (using circle extents for circles).
+    // Clamp to output bounds (using circle extents for drag, strict for resize).
     if( dest.left < -hInset ) { dest.right -= (dest.left + hInset); dest.left = -hInset; }
     if( dest.top < -vInset )  { dest.bottom -= (dest.top + vInset); dest.top = -vInset; }
     if( dest.right > outW + hInset )  { dest.left -= (dest.right - outW - hInset); dest.right = outW + hInset; }
