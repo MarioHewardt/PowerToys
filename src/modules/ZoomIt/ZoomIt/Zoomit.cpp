@@ -7569,20 +7569,14 @@ LRESULT APIENTRY MainWndProc(
                 wc->SetEnabled( !wasEnabled );
                 if( wasEnabled )
                 {
-                    // Hide the on-screen preview.
-                    g_WebcamPreview.Destroy();
+                    // Hide the on-screen preview but keep the window alive
+                    // so that position/size are preserved for re-show.
+                    g_WebcamPreview.Hide();
                 }
                 else
                 {
-                    // Re-show the on-screen preview.
-                    RECT screenRect;
-                    MONITORINFO mi = { sizeof( mi ) };
-                    HMONITOR hMon = MonitorFromWindow( hWnd, MONITOR_DEFAULTTOPRIMARY );
-                    if( hMon && GetMonitorInfo( hMon, &mi ) )
-                        screenRect = mi.rcMonitor;
-                    else
-                        SetRect( &screenRect, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
-                    g_WebcamPreview.Create( wc, screenRect, wc->GetOutputWidth(), wc->GetOutputHeight() );
+                    // Re-show the on-screen preview at its last position/size.
+                    g_WebcamPreview.Show();
                 }
                 OutputDebug( L"[Webcam] Toggle: %s\n", wasEnabled ? L"OFF" : L"ON" );
             }

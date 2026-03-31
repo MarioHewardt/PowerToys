@@ -135,6 +135,30 @@ void WebcamPreviewWindow::Destroy()
 }
 
 //----------------------------------------------------------------------------
+// WebcamPreviewWindow::Hide / Show
+//
+// Hide or show the preview window without destroying it, preserving the
+// user's last position and size for when it is re-shown.
+//----------------------------------------------------------------------------
+void WebcamPreviewWindow::Hide()
+{
+    if( m_hwnd )
+    {
+        KillTimer( m_hwnd, TIMER_ID );
+        ShowWindow( m_hwnd, SW_HIDE );
+    }
+}
+
+void WebcamPreviewWindow::Show()
+{
+    if( m_hwnd )
+    {
+        ShowWindow( m_hwnd, SW_SHOWNA );
+        SetTimer( m_hwnd, TIMER_ID, TIMER_MS, nullptr );
+    }
+}
+
+//----------------------------------------------------------------------------
 // WebcamPreviewWindow::OnTimer
 //
 // Fetches the latest webcam pixels and triggers a repaint.

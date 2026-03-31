@@ -36,6 +36,11 @@ public:
     // Destroy the preview window and stop the refresh timer.
     void Destroy();
 
+    // Hide/show the preview window without destroying it,
+    // preserving the user's last position and size.
+    void Hide();
+    void Show();
+
     // Returns true if the preview window is active.
     bool IsActive() const { return m_hwnd != nullptr; }
 
