@@ -3607,7 +3607,7 @@ LRESULT CALLBACK CheckboxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
             if (checkOnRight)
             {
                 rcText.right = rcCheck.left - ScaleForDpi(4, dpi);
-                textFormat |= DT_RIGHT;
+                textFormat |= DT_LEFT;
             }
             else
             {
