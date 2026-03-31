@@ -43,7 +43,8 @@ public:
         UINT outputHeight,
         Position position,
         Size size,
-        Shape shape );
+        Shape shape,
+        bool fullScreenRecording = false );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -143,6 +144,7 @@ private:
     Position                            m_position = BottomRight;
     Size                                m_size = Medium;
     Shape                               m_shape = Square;
+    bool                                m_fullScreenRecording = false;
 
     // Capture thread.
     std::thread                         m_thread;

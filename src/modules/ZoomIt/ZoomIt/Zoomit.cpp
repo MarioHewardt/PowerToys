@@ -6794,8 +6794,8 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
             auto* wc = g_RecordingSession->GetWebcamCapture();
             g_WebcamPreview.Create( wc, screenRect, wc->GetOutputWidth(), wc->GetOutputHeight() );
 
-            // Register Ctrl+W to toggle webcam overlay during recording.
-            RegisterHotKey( hWnd, WEBCAM_TOGGLE_HOTKEY, MOD_CONTROL | MOD_NOREPEAT, 'W' );
+            // Register Ctrl+C to toggle webcam overlay during recording.
+            RegisterHotKey( hWnd, WEBCAM_TOGGLE_HOTKEY, MOD_CONTROL | MOD_NOREPEAT, 'C' );
         }
 
         if( g_hWndLiveZoom != NULL )
@@ -7561,7 +7561,7 @@ LRESULT APIENTRY MainWndProc(
         switch( wParam ) {
         case WEBCAM_TOGGLE_HOTKEY:
         {
-            // Ctrl+W during recording: toggle webcam overlay on/off.
+            // Ctrl+C during recording: toggle webcam overlay on/off.
             if( g_RecordToggle && g_RecordingSession && g_RecordingSession->GetWebcamCapture() )
             {
                 auto* wc = g_RecordingSession->GetWebcamCapture();
