@@ -1014,6 +1014,44 @@ VideoRecordingSession::VideoRecordingSession(
     }
     if( g_WebcamOverlay )
     {
+        RecDiag( L"Constructor: probing webcam for exclusive access\n" );
+
+        // Check if the camera is already in use by another application.
+        // Frame Server allows shared access, so the MF source reader would
+        // succeed even when Teams etc. hold the camera.  We probe with
+        // ExclusiveControl to detect this before starting the capture thread.
+        // The probe must run on a background (MTA) thread because the
+        // constructor runs on the STA UI thread where .get() would deadlock.
+        std::wstring probeDeviceId( g_WebcamDeviceSymLink );
+        auto probeResult = std::async( std::launch::async, [&probeDeviceId]() -> bool
+        {
+            try
+            {
+                winrt::Windows::Media::Capture::MediaCapture probeCapture;
+                winrt::Windows::Media::Capture::MediaCaptureInitializationSettings probeSettings;
+                probeSettings.SharingMode( winrt::Windows::Media::Capture::MediaCaptureSharingMode::ExclusiveControl );
+                probeSettings.StreamingCaptureMode( winrt::Windows::Media::Capture::StreamingCaptureMode::Video );
+                if( !probeDeviceId.empty() )
+                {
+                    probeSettings.VideoDeviceId( winrt::hstring( probeDeviceId ) );
+                }
+                probeCapture.InitializeAsync( probeSettings ).get();
+                probeCapture.Close();
+                return true;
+            }
+            catch( ... )
+            {
+                return false;
+            }
+        });
+
+        if( !probeResult.get() )
+        {
+            RecDiag( L"Constructor: webcam is in use by another application\n" );
+            throw winrt::hresult_error( E_ACCESSDENIED,
+                L"The webcam could not be opened. It may be in use by another application." );
+        }
+
         RecDiag( L"Constructor: creating WebcamCapture\n" );
         // Force rectangle shape in fullscreen mode
         auto webcamShape = (g_WebcamSize == WebcamCapture::FullScreen)
@@ -1087,6 +1125,15 @@ VideoRecordingSession::VideoRecordingSession(
         bool webcamReady = m_webcamCapture->WaitForFirstFrame( 2000 );
         RecDiag( L"Constructor: WaitForFirstFrame returned %s\n",
                  webcamReady ? L"TRUE (ready)" : L"FALSE (timeout)" );
+
+        if( !webcamReady && m_webcamCapture->HasInitFailed() )
+        {
+            RecDiag( L"Constructor: webcam init failed (camera may be in use)\n" );
+            m_webcamCapture->Stop();
+            m_webcamCapture.reset();
+            throw winrt::hresult_error( E_ACCESSDENIED,
+                L"The webcam could not be opened. It may be in use by another application." );
+        }
     }
     RecDiag( L"Constructor: exit\n" );
 }

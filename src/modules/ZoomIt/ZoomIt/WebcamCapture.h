@@ -97,6 +97,10 @@ public:
     void SetEnabled( bool enabled ) { m_enabled.store( enabled, std::memory_order_relaxed ); }
     bool IsEnabled() const { return m_enabled.load( std::memory_order_relaxed ); }
 
+    // Returns true if the capture thread failed to initialize the camera
+    // (e.g. device in use by another application).
+    bool HasInitFailed() const { return m_initFailed.load( std::memory_order_acquire ); }
+
 private:
     void CaptureThread();
     bool InitSourceReader();
@@ -150,6 +154,7 @@ private:
     std::thread                         m_thread;
     std::atomic<bool>                   m_running{ false };
     std::atomic<bool>                   m_enabled{ true };
+    std::atomic<bool>                   m_initFailed{ false };
     bool                                m_mfStarted = false;
 
     // Signalled once the first webcam frame has been captured so

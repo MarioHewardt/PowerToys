@@ -229,7 +229,7 @@ bool WebcamCapture::WaitForFirstFrame( int timeoutMs )
 {
     std::unique_lock<std::mutex> lock( m_readyMutex );
     m_readyCV.wait_for( lock, std::chrono::milliseconds( timeoutMs ),
-                        [this]{ return m_firstFrameCaptured; } );
+                        [this]{ return m_firstFrameCaptured || m_initFailed.load( std::memory_order_acquire ); } );
     return m_firstFrameCaptured;
 }
 
@@ -271,6 +271,13 @@ void WebcamCapture::CaptureThread()
     if( !InitSourceReader() )
     {
         OutputDebug( L"[WebcamCapture] InitSourceReader failed on capture thread\n" );
+        m_initFailed.store( true, std::memory_order_release );
+        // Wake up WaitForFirstFrame so it doesn't block for the full timeout.
+        {
+            std::lock_guard<std::mutex> lock( m_readyMutex );
+            m_firstFrameCaptured = false;
+        }
+        m_readyCV.notify_all();
         CoUninitialize();
         return;
     }
