@@ -654,25 +654,15 @@ void WebcamPreviewWindow::OnMouseMove( int x, int y )
     int newX = cursor.x - m_dragOffset.x;
     int newY = cursor.y - m_dragOffset.y;
 
-    // For circle shapes, the inscribed circle doesn't reach the edges
-    // of a non-square bounding rect.  Allow the window to extend past
-    // the screen boundary by the inset so the circle itself touches.
-    int hInset = 0, vInset = 0;
-    if( m_capture && m_capture->GetShape() == WebcamCapture::Circle )
-    {
-        hInset = max( 0, wndW - wndH ) / 2;
-        vInset = max( 0, wndH - wndW ) / 2;
-    }
-
-    // Constrain to recording region (using circle extents, not rect).
-    if( newX < m_screenRect.left - hInset )
-        newX = m_screenRect.left - hInset;
-    if( newY < m_screenRect.top - vInset )
-        newY = m_screenRect.top - vInset;
-    if( newX + wndW > m_screenRect.right + hInset )
-        newX = m_screenRect.right + hInset - wndW;
-    if( newY + wndH > m_screenRect.bottom + vInset )
-        newY = m_screenRect.bottom + vInset - wndH;
+    // Constrain to recording region.
+    if( newX < m_screenRect.left )
+        newX = m_screenRect.left;
+    if( newY < m_screenRect.top )
+        newY = m_screenRect.top;
+    if( newX + wndW > m_screenRect.right )
+        newX = m_screenRect.right - wndW;
+    if( newY + wndH > m_screenRect.bottom )
+        newY = m_screenRect.bottom - wndH;
 
     // Reassert HWND_TOPMOST during drag so the live zoom window can't
     // push us behind it mid-drag.
@@ -732,25 +722,11 @@ void WebcamPreviewWindow::SyncOverlayPosition()
     dest.right  = MulDiv( wndRect.right  - m_screenRect.left, outW, screenW );
     dest.bottom = MulDiv( wndRect.bottom - m_screenRect.top,  outH, screenH );
 
-    // For circle shapes during drag, the inscribed circle doesn't reach
-    // the edges of a non-square bounding rect.  Allow the dest rect to
-    // extend past output bounds by the circle inset so the circle touches
-    // the edge.  During resize, keep the bounding rect strictly within
-    // the output bounds.
-    int destW = dest.right - dest.left;
-    int destH = dest.bottom - dest.top;
-    int hInset = 0, vInset = 0;
-    if( !m_resizing && m_capture && m_capture->GetShape() == WebcamCapture::Circle )
-    {
-        hInset = max( 0, destW - destH ) / 2;
-        vInset = max( 0, destH - destW ) / 2;
-    }
-
-    // Clamp to output bounds (using circle extents for drag, strict for resize).
-    if( dest.left < -hInset ) { dest.right -= (dest.left + hInset); dest.left = -hInset; }
-    if( dest.top < -vInset )  { dest.bottom -= (dest.top + vInset); dest.top = -vInset; }
-    if( dest.right > outW + hInset )  { dest.left -= (dest.right - outW - hInset); dest.right = outW + hInset; }
-    if( dest.bottom > outH + vInset ) { dest.top -= (dest.bottom - outH - vInset); dest.bottom = outH + vInset; }
+    // Clamp to output bounds.
+    if( dest.left < 0 ) { dest.right -= dest.left; dest.left = 0; }
+    if( dest.top < 0 )  { dest.bottom -= dest.top; dest.top = 0; }
+    if( dest.right > outW )  { dest.left -= (dest.right - outW); dest.right = outW; }
+    if( dest.bottom > outH ) { dest.top -= (dest.bottom - outH); dest.bottom = outH; }
 
     if( m_resizing )
     {

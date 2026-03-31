@@ -101,6 +101,7 @@ COLORREF	g_CustomColors[16];
 #define SNIP_OCR_HOTKEY          18
 #define SNIP_PANORAMA_HOTKEY     19
 #define SNIP_PANORAMA_SAVE_HOTKEY 20
+#define WEBCAM_TOGGLE_HOTKEY     21
 
 #define ZOOM_PAGE	  0
 #define LIVE_PAGE	  1
@@ -2974,9 +2975,11 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE_LABEL), !isGifSelected);
                 EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE), !isGifSelected);
 
-                // Enable/disable webcam controls (webcam overlay is MP4-only)
-                bool webcamEnabled = !isGifSelected && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_OVERLAY), !isGifSelected);
+                // Enable/disable webcam controls (webcam overlay is MP4-only).
+                // Also keep everything disabled if no webcam is present.
+                bool hasWebcam = SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE), CB_GETCOUNT, 0, 0) > 1;
+                bool webcamEnabled = hasWebcam && !isGifSelected && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_OVERLAY), hasWebcam && !isGifSelected);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE_LABEL), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_DEVICE), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION_LABEL), webcamEnabled);
@@ -4987,10 +4990,12 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamShape), static_cast<LPARAM>(0) );
         }
 
-        // Set initial enabled state for webcam controls
+        // Set initial enabled state for webcam controls.
+        // Disable everything if no webcam is detected on the system.
         {
-            bool webcamEnabled = !isGifSelected && g_WebcamOverlay;
-            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_OVERLAY), !isGifSelected);
+            bool hasWebcam = !webcams.empty();
+            bool webcamEnabled = hasWebcam && !isGifSelected && g_WebcamOverlay;
+            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_OVERLAY), hasWebcam && !isGifSelected);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_DEVICE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_DEVICE), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION_LABEL), webcamEnabled);
@@ -6535,6 +6540,7 @@ void StopRecording()
     if( g_RecordToggle == TRUE ) {
 
         OutputDebugStringW(L"[Recording] g_RecordToggle was TRUE, stopping...\n");
+        UnregisterHotKey( g_hWndMain, WEBCAM_TOGGLE_HOTKEY );
         g_WebcamPreview.Destroy();
         g_SelectRectangle.Stop();
 
@@ -6787,6 +6793,9 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
 
             auto* wc = g_RecordingSession->GetWebcamCapture();
             g_WebcamPreview.Create( wc, screenRect, wc->GetOutputWidth(), wc->GetOutputHeight() );
+
+            // Register Ctrl+W to toggle webcam overlay during recording.
+            RegisterHotKey( hWnd, WEBCAM_TOGGLE_HOTKEY, MOD_CONTROL | MOD_NOREPEAT, 'W' );
         }
 
         if( g_hWndLiveZoom != NULL )
@@ -7550,6 +7559,35 @@ LRESULT APIENTRY MainWndProc(
             Sleep(250);
         }
         switch( wParam ) {
+        case WEBCAM_TOGGLE_HOTKEY:
+        {
+            // Ctrl+W during recording: toggle webcam overlay on/off.
+            if( g_RecordToggle && g_RecordingSession && g_RecordingSession->GetWebcamCapture() )
+            {
+                auto* wc = g_RecordingSession->GetWebcamCapture();
+                bool wasEnabled = wc->IsEnabled();
+                wc->SetEnabled( !wasEnabled );
+                if( wasEnabled )
+                {
+                    // Hide the on-screen preview.
+                    g_WebcamPreview.Destroy();
+                }
+                else
+                {
+                    // Re-show the on-screen preview.
+                    RECT screenRect;
+                    MONITORINFO mi = { sizeof( mi ) };
+                    HMONITOR hMon = MonitorFromWindow( hWnd, MONITOR_DEFAULTTOPRIMARY );
+                    if( hMon && GetMonitorInfo( hMon, &mi ) )
+                        screenRect = mi.rcMonitor;
+                    else
+                        SetRect( &screenRect, 0, 0, GetSystemMetrics( SM_CXSCREEN ), GetSystemMetrics( SM_CYSCREEN ) );
+                    g_WebcamPreview.Create( wc, screenRect, wc->GetOutputWidth(), wc->GetOutputHeight() );
+                }
+                OutputDebug( L"[Webcam] Toggle: %s\n", wasEnabled ? L"OFF" : L"ON" );
+            }
+            break;
+        }
         case LIVE_DRAW_HOTKEY:
         {
             OutputDebug(L"LIVE_DRAW_HOTKEY\n");

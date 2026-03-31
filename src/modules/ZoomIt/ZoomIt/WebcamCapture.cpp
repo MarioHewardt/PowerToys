@@ -450,7 +450,7 @@ void WebcamCapture::CaptureThread()
             UINT srcCropX = 0, srcCropY = 0;
             UINT srcCropW = m_camWidth, srcCropH = m_camHeight;
 
-            if( m_size == FullScreen && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
+            if( (m_size == FullScreen || m_shape == Circle) && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
             {
                 // Compare aspect ratios: camera vs output.
                 // Scale camera so it fills the output, then crop excess.
@@ -630,35 +630,36 @@ RECT WebcamCapture::ComputeDestRect() const
     if( overlayH > static_cast<int>( m_outputHeight ) - margin * 2 )
         overlayH = static_cast<int>( m_outputHeight ) - margin * 2;
 
-    // For circle shapes, the visible content is inscribed in the bounding
-    // rect.  Offset the position so the circle itself sits at the corner
-    // margin, not the bounding box.
-    int hInset = 0, vInset = 0;
+    // For circle shapes, make the bounding box square (use the smaller
+    // dimension as the diameter).  The webcam source is center-cropped
+    // to fill this square, and the circle mask clips to the inscribed
+    // circle — which now equals the full bounding box.
     if( m_shape == Circle )
     {
-        hInset = max( 0, overlayW - overlayH ) / 2;
-        vInset = max( 0, overlayH - overlayW ) / 2;
+        int diameter = min( overlayW, overlayH );
+        overlayW = diameter;
+        overlayH = diameter;
     }
 
     RECT dst = {};
     switch( m_position )
     {
     case TopLeft:
-        dst.left = margin - hInset;
-        dst.top = margin - vInset;
+        dst.left = margin;
+        dst.top = margin;
         break;
     case TopRight:
-        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin + hInset;
-        dst.top = margin - vInset;
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
+        dst.top = margin;
         break;
     case BottomLeft:
-        dst.left = margin - hInset;
-        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin + vInset;
+        dst.left = margin;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
         break;
     case BottomRight:
     default:
-        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin + hInset;
-        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin + vInset;
+        dst.left = static_cast<int>( m_outputWidth ) - overlayW - margin;
+        dst.top = static_cast<int>( m_outputHeight ) - overlayH - margin;
         break;
     }
     dst.right = dst.left + overlayW;
@@ -691,6 +692,9 @@ void WebcamCapture::ComputeOverlayDimensions()
 //----------------------------------------------------------------------------
 bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 {
+    if( !m_enabled.load( std::memory_order_relaxed ) )
+        return false;
+
 #if _DEBUG
     m_compositeCount++;
 #endif
@@ -903,6 +907,9 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 //----------------------------------------------------------------------------
 bool WebcamCapture::GetLatestPixels( std::vector<BYTE>& outPixels, UINT& outW, UINT& outH )
 {
+    if( !m_enabled.load( std::memory_order_relaxed ) )
+        return false;
+
     std::lock_guard<std::mutex> lock( m_frameLock );
     if( m_pendingPixels.empty() || m_pendingW == 0 || m_pendingH == 0 )
         return false;

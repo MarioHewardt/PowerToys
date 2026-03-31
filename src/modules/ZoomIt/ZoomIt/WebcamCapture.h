@@ -90,6 +90,12 @@ public:
     // Return the overlay shape.
     Shape GetShape() const { return m_shape; }
 
+    // Enable or disable compositing.  When disabled, CompositeOnto and
+    // GetLatestPixels return false without doing any work.  The capture
+    // thread continues running so re-enabling is instant.
+    void SetEnabled( bool enabled ) { m_enabled.store( enabled, std::memory_order_relaxed ); }
+    bool IsEnabled() const { return m_enabled.load( std::memory_order_relaxed ); }
+
 private:
     void CaptureThread();
     bool InitSourceReader();
@@ -141,6 +147,7 @@ private:
     // Capture thread.
     std::thread                         m_thread;
     std::atomic<bool>                   m_running{ false };
+    std::atomic<bool>                   m_enabled{ true };
     bool                                m_mfStarted = false;
 
     // Signalled once the first webcam frame has been captured so
