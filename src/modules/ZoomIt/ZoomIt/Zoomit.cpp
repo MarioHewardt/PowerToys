@@ -4840,6 +4840,9 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO,
             g_CaptureAudio ? BST_CHECKED: BST_UNCHECKED );
 
+        CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_RECORD_ASPECT_RATIO,
+            g_RecordAspectRatio ? BST_CHECKED: BST_UNCHECKED );
+
         //
         // The framerate drop down list is not used in the current version (might be added in the future)
         //
@@ -5359,6 +5362,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             g_BreakLockWorkstation = IsDlgButtonChecked( g_OptionsTabs[BREAK_PAGE].hPage, IDC_CHECK_LOCK_WORKSTATION ) == BST_CHECKED;
             g_CaptureSystemAudio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_SYSTEM_AUDIO) == BST_CHECKED;
             g_CaptureAudio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO) == BST_CHECKED;
+            g_RecordAspectRatio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_RECORD_ASPECT_RATIO) == BST_CHECKED;
             GetDlgItemText( g_OptionsTabs[BREAK_PAGE].hPage, IDC_TIMER, text, 3 );
             text[2] = 0;
             newTimeout = _tstoi( text );
@@ -8129,6 +8133,7 @@ LRESULT APIENTRY MainWndProc(
                 }
 
                 // This call blocks with a message loop while cropping.
+                g_SelectRectangle.AspectRatio( g_RecordAspectRatio ? 16.0 / 9.0 : 0.0 );
                 auto canceled = !g_SelectRectangle.Start( ( g_hWndLiveZoom != nullptr ) ? g_hWndLiveZoom : hWnd );
                 g_RecordCropping = FALSE;
 

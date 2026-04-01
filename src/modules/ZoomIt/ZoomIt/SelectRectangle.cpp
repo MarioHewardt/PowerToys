@@ -377,6 +377,41 @@ LRESULT SelectRectangle::WindowProc( HWND window, UINT message, WPARAM wordParam
             GetClientRect( window, &rect );
             POINT point{ GET_X_LPARAM( longParam ), GET_Y_LPARAM( longParam ) };
             m_selectedRect = ForceRectInBounds( RectFromPointsMinSize( m_startPoint, point, MinSize() ), rect );
+
+            // Apply aspect ratio constraint if set.
+            if( m_aspectRatio > 0.0 )
+            {
+                LONG w = m_selectedRect.right - m_selectedRect.left;
+                LONG h = m_selectedRect.bottom - m_selectedRect.top;
+                LONG newW, newH;
+
+                if( w >= h )
+                {
+                    // Landscape: width drives, compute height from 16:9.
+                    newW = w;
+                    newH = max( static_cast<LONG>( w / m_aspectRatio + 0.5 ), static_cast<LONG>( MinSize() ) );
+                }
+                else
+                {
+                    // Portrait: height drives, compute width from 9:16.
+                    newH = h;
+                    newW = max( static_cast<LONG>( h / m_aspectRatio + 0.5 ), static_cast<LONG>( MinSize() ) );
+                }
+
+                // Anchor from the start point side.
+                if( point.x >= m_startPoint.x )
+                    m_selectedRect.right = m_selectedRect.left + newW;
+                else
+                    m_selectedRect.left = m_selectedRect.right - newW;
+
+                if( point.y >= m_startPoint.y )
+                    m_selectedRect.bottom = m_selectedRect.top + newH;
+                else
+                    m_selectedRect.top = m_selectedRect.bottom - newH;
+
+                m_selectedRect = ForceRectInBounds( m_selectedRect, rect );
+            }
+
             SelectRectangleDebugLog( L"[SelectRectangle] Drag rect=(%ld,%ld)-(%ld,%ld)\n",
                                      m_selectedRect.left,
                                      m_selectedRect.top,

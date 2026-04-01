@@ -19,6 +19,8 @@ public:
     BYTE Alpha() const { return m_alpha; }
     void MinSize( int minSize ) { m_minSize = minSize; }
     int MinSize() const { return m_minSize; }
+    void AspectRatio( double ratio ) { m_aspectRatio = ratio; }
+    double AspectRatio() const { return m_aspectRatio; }
     RECT SelectedRect() const { return m_selectedRect; }
     bool IsActive() const { return m_window != nullptr; }
 
@@ -41,6 +43,7 @@ public:
 private:
     BYTE m_alpha = 176;
     int m_minSize = 34;
+    double m_aspectRatio = 0.0; // 0 = no constraint, e.g. 16.0/9.0
     RECT m_selectedRect{};
     COLORREF m_borderColor = RGB( 255, 222, 0 ); // default: yellow (matches capture API)
     bool m_recordingActive = false; // true once first frame is captured

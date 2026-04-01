@@ -88,7 +88,7 @@ BEGIN
             VALUE "FileDescription", "Sysinternals Screen Magnifier"
             VALUE "FileVersion", "10.1"
             VALUE "InternalName", "ZoomIt"
-            VALUE "LegalCopyright", "Copyright � 2006-2026 Mark Russinovich"
+            VALUE "LegalCopyright", "Copyright \251 2006-2026 Mark Russinovich"
             VALUE "OriginalFilename", "ZoomIt.exe"
             VALUE "ProductName", "Sysinternals ZoomIt"
             VALUE "ProductVersion", "19.1"
@@ -265,10 +265,11 @@ BEGIN
     LTEXT           "Record video of the unzoomed live screen or a static zoomed session by entering the recording hot key and finish the recording by entering it again. ",IDC_STATIC,7,7,248,22
     LTEXT           "Scaling:",IDC_STATIC,30,90,26,8
     COMBOBOX        IDC_RECORD_SCALING,61,89,26,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "16:9:",IDC_RECORD_ASPECT_RATIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,93,90,30,10
     LTEXT           "Format:",IDC_STATIC,30,108,26,8
     COMBOBOX        IDC_RECORD_FORMAT,61,106,60,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Frame Rate:",IDC_STATIC,119,90,44,8,NOT WS_VISIBLE
-    COMBOBOX        IDC_RECORD_FRAME_RATE,166,89,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Frame Rate:",IDC_STATIC,135,90,44,8,NOT WS_VISIBLE
+    COMBOBOX        IDC_RECORD_FRAME_RATE,182,89,42,30,CBS_DROPDOWNLIST | CBS_AUTOHSCROLL | CBS_OEMCONVERT | CBS_SORT | NOT WS_VISIBLE | WS_VSCROLL | WS_TABSTOP
     LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,29,245,18
     LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,48,251,19
     CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,124,86,10
