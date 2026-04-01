@@ -10328,6 +10328,7 @@ static bool RunPanoramaCaptureCommon( HWND hWnd, bool saveToFile )
     } captureStitchLogGuard;
 
     g_RecordCropping = TRUE;
+    g_SelectRectangle.AspectRatio( 0.0 );
     const bool started = g_SelectRectangle.Start( hWnd );
     g_RecordCropping = FALSE;
     if( !started )

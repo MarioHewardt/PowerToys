@@ -8209,6 +8209,7 @@ LRESULT APIENTRY MainWndProc(
                     {
                         // Pass NULL as owner — the main window may be hidden,
                         // and owned popups of hidden owners are hidden too.
+                        g_SelectRectangle.AspectRatio( 0.0 );
                         g_SelectRectangle.Start( nullptr, true );
                         OutputDebugStringW( L"[RecBorder] SelectRectangle::Start returned OK\n" );
                     }
