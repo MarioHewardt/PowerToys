@@ -4987,8 +4987,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
 
         // Webcam shape combo
         {
-            const wchar_t* shapes[] = { L"Square", L"Rounded", L"Circle" };
-            for( int i = 0; i < 3; i++ )
+            const wchar_t* shapes[] = { L"Rectangle", L"Rounded Rectangle", L"Rounded Square", L"Circle" };
+            for( int i = 0; i < 4; i++ )
                 SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE ), static_cast<UINT>(CB_ADDSTRING), static_cast<WPARAM>(0), reinterpret_cast<LPARAM>(shapes[i]) );
             SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE ), CB_SETCURSEL, static_cast<WPARAM>(g_WebcamShape), static_cast<LPARAM>(0) );
         }

@@ -459,7 +459,7 @@ void WebcamCapture::CaptureThread()
             UINT srcCropX = 0, srcCropY = 0;
             UINT srcCropW = m_camWidth, srcCropH = m_camHeight;
 
-            if( (m_size == FullScreen || m_shape == Circle) && !m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
+            if( (m_size == FullScreen || m_shape == Circle || m_shape == RoundedSquare) && !m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
             {
                 // Compare aspect ratios: camera vs output.
                 // Scale camera so it fills the output, then crop excess.
@@ -486,7 +486,9 @@ void WebcamCapture::CaptureThread()
             const float halfW = ovW * 0.5f;
             const float halfH = ovH * 0.5f;
             // Rounded-rect corner radius: 10% of the smaller dimension.
-            const float cornerRadius = min( halfW, halfH ) * 0.10f;
+            // Rounded-square corner radius: 40% for exaggerated rounding.
+            const float cornerRadius = min( halfW, halfH ) *
+                ( m_shape == RoundedSquare ? 0.40f : 0.10f );
 
             for( UINT y = 0; y < ovH; y++ )
             {
@@ -510,7 +512,7 @@ void WebcamCapture::CaptureThread()
                         float dy = ( y + 0.5f - halfH ) / radius;
                         inside = ( dx * dx + dy * dy ) <= 1.0f;
                     }
-                    else if( m_shape == RoundedRect )
+                    else if( m_shape == RoundedRect || m_shape == RoundedSquare )
                     {
                         // Check corners only — the interior and edges are always inside.
                         float px = static_cast<float>( x ) + 0.5f;
@@ -663,11 +665,10 @@ RECT WebcamCapture::ComputeDestRect() const
     if( overlayH > static_cast<int>( m_outputHeight ) - margin * 2 )
         overlayH = static_cast<int>( m_outputHeight ) - margin * 2;
 
-    // For circle shapes, make the bounding box square (use the smaller
-    // dimension as the diameter).  The webcam source is center-cropped
-    // to fill this square, and the circle mask clips to the inscribed
-    // circle — which now equals the full bounding box.
-    if( m_shape == Circle )
+    // For circle and rounded-square shapes, make the bounding box square
+    // (use the smaller dimension).  The webcam source is center-cropped
+    // to fill this square.
+    if( m_shape == Circle || m_shape == RoundedSquare )
     {
         int diameter = min( overlayW, overlayH );
         overlayW = diameter;

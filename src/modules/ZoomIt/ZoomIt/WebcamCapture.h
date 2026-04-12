@@ -33,7 +33,7 @@ public:
     enum Size { Small = 0, Medium = 1, Large = 2, XLarge = 3, FullScreen = 4 };
 
     // Shape constants matching g_WebcamShape values.
-    enum Shape { Square = 0, RoundedRect = 1, Circle = 2 };
+    enum Shape { Square = 0, RoundedRect = 1, RoundedSquare = 2, Circle = 3 };
 
     WebcamCapture(
         winrt::com_ptr<ID3D11Device> const& device,
