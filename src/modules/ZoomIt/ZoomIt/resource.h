@@ -126,6 +126,8 @@
 #define IDC_WEBCAM_SHAPE_LABEL          1124
 #define IDC_TRIM_APPEND                 1122
 #define IDC_RECORD_ASPECT_RATIO         1125
+#define IDC_VCAM_HOTKEY                 1126
+#define IDC_VCAM                        40016
 #define IDC_SAVE                        40002
 #define IDC_COPY                        40004
 #define IDC_RECORD                      40006

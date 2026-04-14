@@ -103,6 +103,8 @@ COLORREF	g_CustomColors[16];
 #define SNIP_PANORAMA_HOTKEY     19
 #define SNIP_PANORAMA_SAVE_HOTKEY 20
 #define WEBCAM_TOGGLE_HOTKEY     21
+#define VCAM_HOTKEY              22
+#define VCAM_CROP_HOTKEY         23
 
 #define ZOOM_PAGE	  0
 #define LIVE_PAGE	  1
@@ -118,6 +120,7 @@ COLORREF	g_CustomColors[16];
 #define RECORD_PAGE	  6
 #define SNIP_PAGE	  7
 #define PANORAMA_PAGE 8
+#define VCAM_PAGE     9
 
 OPTION_TABS g_OptionsTabs[] = {
     { _T("Zoom"), NULL },
@@ -128,7 +131,8 @@ OPTION_TABS g_OptionsTabs[] = {
     { _T("Break"), NULL },
     { _T("Record"), NULL },
     { _T("Snip"), NULL },
-    { _T("Panorama"), NULL }
+    { _T("Panorama"), NULL },
+    { _T("VCam"), NULL }
 };
 
 static const TCHAR* g_RecordingFormats[] = {
@@ -175,6 +179,8 @@ DWORD	g_RecordToggleMod;
 DWORD   g_SnipToggleMod;
 DWORD   g_SnipPanoramaToggleMod;
 DWORD   g_SnipOcrToggleMod;
+DWORD   g_VCamToggleMod;
+BOOL    g_VCamToggle = FALSE;
 
 BOOLEAN	g_ZoomOnLiveZoom = FALSE;
 DWORD	g_PenWidth = PEN_WIDTH;
@@ -414,6 +420,8 @@ const wchar_t* HotkeyIdToString( WPARAM hotkeyId )
     case SNIP_OCR_HOTKEY: return L"SNIP_OCR_HOTKEY";
     case SNIP_PANORAMA_HOTKEY: return L"SNIP_PANORAMA_HOTKEY";
     case SNIP_PANORAMA_SAVE_HOTKEY: return L"SNIP_PANORAMA_SAVE_HOTKEY";
+    case VCAM_HOTKEY: return L"VCAM_HOTKEY";
+    case VCAM_CROP_HOTKEY: return L"VCAM_CROP_HOTKEY";
     default: return L"UNKNOWN_HOTKEY";
     }
 }
@@ -3314,6 +3322,8 @@ void UnregisterAllHotkeys( HWND hWnd )
     unregisterHotkey( SAVE_CROP_HOTKEY );
     unregisterHotkey( COPY_IMAGE_HOTKEY );
     unregisterHotkey( COPY_CROP_HOTKEY );
+    unregisterHotkey( VCAM_HOTKEY );
+    unregisterHotkey( VCAM_CROP_HOTKEY );
 }
 
 //----------------------------------------------------------------------------
@@ -3356,6 +3366,10 @@ void RegisterAllHotkeys(HWND hWnd)
         registerHotkey( RECORD_HOTKEY, g_RecordToggleMod | MOD_NOREPEAT, g_RecordToggleKey & 0xFF );
         registerHotkey( RECORD_CROP_HOTKEY, ( g_RecordToggleMod ^ MOD_SHIFT ) | MOD_NOREPEAT, g_RecordToggleKey & 0xFF );
         registerHotkey( RECORD_WINDOW_HOTKEY, ( g_RecordToggleMod ^ MOD_ALT ) | MOD_NOREPEAT, g_RecordToggleKey & 0xFF );
+    }
+    if (g_VCamToggleKey) {
+        registerHotkey( VCAM_HOTKEY, g_VCamToggleMod | MOD_NOREPEAT, g_VCamToggleKey & 0xFF );
+        registerHotkey( VCAM_CROP_HOTKEY, ( g_VCamToggleMod ^ MOD_SHIFT ) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF );
     }
 
     // Note: COPY_IMAGE_HOTKEY, COPY_CROP_HOTKEY (Ctrl+C, Ctrl+Shift+C) and
@@ -4807,6 +4821,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         if( g_SnipToggleKey) 	SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_HOTKEY), HKM_SETHOTKEY, g_SnipToggleKey, 0 );
         if( g_SnipPanoramaToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_SETHOTKEY, g_SnipPanoramaToggleKey, 0 );
         if( g_SnipOcrToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_SETHOTKEY, g_SnipOcrToggleKey, 0 );
+        if( g_VCamToggleKey ) SendMessage( GetDlgItem( g_OptionsTabs[VCAM_PAGE].hPage, IDC_VCAM_HOTKEY), HKM_SETHOTKEY, g_VCamToggleKey, 0 );
         CheckDlgButton( hDlg, IDC_SHOW_TRAY_ICON,
             g_ShowTrayIcon ? BST_CHECKED: BST_UNCHECKED );
         CheckDlgButton( hDlg, IDC_AUTOSTART,
@@ -5345,6 +5360,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             newSnipPanoramaToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             newSnipOcrToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
+            DWORD newVCamToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[VCAM_PAGE].hPage, IDC_VCAM_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
 
             newToggleMod = GetKeyMod( newToggleKey );
             newLiveZoomToggleMod = GetKeyMod( newLiveZoomToggleKey );
@@ -5355,6 +5371,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipToggleMod = GetKeyMod( newSnipToggleKey );
             newSnipPanoramaToggleMod = GetKeyMod( newSnipPanoramaToggleKey );
             newSnipOcrToggleMod = GetKeyMod( newSnipOcrToggleKey );
+            DWORD newVCamToggleMod = GetKeyMod( newVCamToggleKey );
 
             g_SliderZoomLevel = static_cast<int>(SendMessage( GetDlgItem(g_OptionsTabs[ZOOM_PAGE].hPage, IDC_ZOOM_SLIDER), TBM_GETPOS, 0, 0 ));
             g_DemoTypeSpeedSlider = static_cast<int>(SendMessage( GetDlgItem( g_OptionsTabs[DEMOTYPE_PAGE].hPage, IDC_DEMOTYPE_SPEED_SLIDER ), TBM_GETPOS, 0, 0 ));
@@ -5486,6 +5503,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 g_SnipPanoramaToggleMod = newSnipPanoramaToggleMod;
                 g_SnipOcrToggleKey = newSnipOcrToggleKey;
                 g_SnipOcrToggleMod = newSnipOcrToggleMod;
+                g_VCamToggleKey = newVCamToggleKey;
+                g_VCamToggleMod = newVCamToggleMod;
                 reg.WriteRegSettings( RegSettings );
                 EnableDisableTrayIcon( GetParent( hDlg ), g_ShowTrayIcon );
 
@@ -7399,6 +7418,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipPanoramaToggleMod = GetKeyMod( g_SnipPanoramaToggleKey );
         g_SnipOcrToggleMod = GetKeyMod( g_SnipOcrToggleKey );
         g_RecordToggleMod = GetKeyMod( g_RecordToggleKey );
+        g_VCamToggleMod = GetKeyMod( g_VCamToggleKey );
 
         if( !g_OptionsShown && !g_StartedByPowerToys ) {
             // First run should show options when running as standalone. If not running as standalone,
@@ -8239,6 +8259,26 @@ LRESULT APIENTRY MainWndProc(
                 StopRecording();
             }
             break;
+
+        case VCAM_HOTKEY:
+        case VCAM_CROP_HOTKEY:
+        {
+            //
+            // Virtual Camera
+            //
+            OutputDebug( L"[VCam] VCAM_HOTKEY wParam=%ld\n", static_cast<long>( wParam ) );
+            if( g_VCamToggle == FALSE )
+            {
+                g_VCamToggle = TRUE;
+                OutputDebug( L"[VCam] Virtual camera started (placeholder)\n" );
+            }
+            else
+            {
+                g_VCamToggle = FALSE;
+                OutputDebug( L"[VCam] Virtual camera stopped (placeholder)\n" );
+            }
+            break;
+        }
 
         case ZOOM_HOTKEY:
             //
@@ -9891,6 +9931,7 @@ LRESULT APIENTRY MainWndProc(
                 InsertMenu( hPopupMenu, 0, MF_BYPOSITION|MF_SEPARATOR, 0, NULL );
             }
             InsertMenu( hPopupMenu, 0, MF_BYPOSITION | ( g_RecordToggle ? MF_CHECKED : 0 ), IDC_RECORD, L"&Record" );
+            InsertMenu( hPopupMenu, 0, MF_BYPOSITION | ( g_VCamToggle ? MF_CHECKED : 0 ), IDC_VCAM, L"&Virtual Camera" );
             InsertMenu( hPopupMenu, 0, MF_BYPOSITION, IDC_ZOOM, L"&Zoom" );
             InsertMenu( hPopupMenu, 0, MF_BYPOSITION, IDC_DRAW, L"&Draw" );
             InsertMenu( hPopupMenu, 0, MF_BYPOSITION, IDC_BREAK, L"&Break Timer" );
@@ -10049,6 +10090,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipPanoramaToggleMod = GetKeyMod(g_SnipPanoramaToggleKey);
         g_SnipOcrToggleMod = GetKeyMod(g_SnipOcrToggleKey);
         g_RecordToggleMod = GetKeyMod(g_RecordToggleKey);
+        g_VCamToggleMod = GetKeyMod(g_VCamToggleKey);
         BOOL showOptions = FALSE;
         if (g_ToggleKey)
         {
@@ -10504,6 +10546,10 @@ LRESULT APIENTRY MainWndProc(
 
         case IDC_RECORD:
             PostMessage( hWnd, WM_HOTKEY, RECORD_HOTKEY, 1 );
+            break;
+
+        case IDC_VCAM:
+            PostMessage( hWnd, WM_HOTKEY, VCAM_HOTKEY, 1 );
             break;
 
         case IDC_OPTIONS:

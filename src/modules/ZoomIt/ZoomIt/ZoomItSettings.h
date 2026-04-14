@@ -19,6 +19,7 @@ DWORD	g_RecordToggleKey = ((HOTKEYF_CONTROL) << 8) | '5';
 DWORD   g_SnipToggleKey = ((HOTKEYF_CONTROL) << 8) | '6';
 DWORD   g_SnipPanoramaToggleKey = ((HOTKEYF_CONTROL) << 8) | '8';
 DWORD   g_SnipOcrToggleKey = ((HOTKEYF_CONTROL | HOTKEYF_ALT) << 8) | '6';
+DWORD   g_VCamToggleKey = ((HOTKEYF_CONTROL) << 8) | '9';
 
 DWORD	g_ShowExpiredTime = 1;
 DWORD	g_SliderZoomLevel = 3;
@@ -120,6 +121,7 @@ REG_SETTING RegSettings[] = {
     { L"WebcamShape", SETTING_TYPE_DWORD, 0, &g_WebcamShape, static_cast<DOUBLE>(g_WebcamShape) },
     { L"WebcamDeviceSymLink", SETTING_TYPE_STRING, sizeof(g_WebcamDeviceSymLink), g_WebcamDeviceSymLink, static_cast<DOUBLE>(0) },
     { L"RecordAspectRatio", SETTING_TYPE_BOOLEAN, 0, &g_RecordAspectRatio, static_cast<DOUBLE>(g_RecordAspectRatio) },
+    { L"VCamToggleKey", SETTING_TYPE_DWORD, 0, &g_VCamToggleKey, static_cast<DOUBLE>(g_VCamToggleKey) },
     { L"RecordingSaveLocation", SETTING_TYPE_STRING, sizeof(g_RecordingSaveLocationBuffer), g_RecordingSaveLocationBuffer, static_cast<DOUBLE>(0) },
     { L"ScreenshotSaveLocation", SETTING_TYPE_STRING, sizeof(g_ScreenshotSaveLocationBuffer), g_ScreenshotSaveLocationBuffer, static_cast<DOUBLE>(0) },
     { L"Theme", SETTING_TYPE_DWORD, 0, &g_ThemeOverride, static_cast<DOUBLE>(g_ThemeOverride) },

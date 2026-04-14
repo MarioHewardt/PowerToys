@@ -311,6 +311,16 @@ BEGIN
     LTEXT           "For the best results, scroll slowly and at a constant rate, do not include stationary content (like scrollbars) in the capture area, and avoid content that is changing (e.g., animations or videos). ",IDC_STATIC,7,41,245,33
 END
 
+VCAM DIALOGEX 0, 0, 260, 80
+STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS | WS_SYSMENU
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "Share a region of your screen as a virtual webcam that apps like Teams or Zoom can select. Use Shift+hotkey to select a region, or Alt+hotkey to capture a window.",IDC_STATIC,7,7,245,26
+    LTEXT           "VCam Toggle:",IDC_STATIC,7,43,50,8
+    CONTROL         "",IDC_VCAM_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,61,41,80,12
+    LTEXT           "Requires Windows 11.",IDC_STATIC,7,63,245,10
+END
+
 DEMOTYPE DIALOGEX 0, 0, 260, 249
 STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS | WS_SYSMENU
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
