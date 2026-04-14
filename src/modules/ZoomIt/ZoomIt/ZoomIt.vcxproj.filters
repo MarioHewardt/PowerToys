@@ -42,6 +42,9 @@
     <ClCompile Include="VersionHelper.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="VirtualCameraProbe.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="VideoRecordingSession.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -96,6 +99,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="VersionHelper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="VirtualCameraProbe.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="VideoRecordingSession.h">

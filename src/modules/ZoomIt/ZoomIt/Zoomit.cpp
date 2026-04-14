@@ -19,6 +19,7 @@
 #include "WebcamPreviewWindow.h"
 #include "BreakTimer.h"
 #include "PanoramaCapture.h"
+#include "VirtualCameraProbe.h"
 #include <wtsapi32.h>
 #include <tlhelp32.h>
 #include <limits>
@@ -11706,6 +11707,16 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         }
     }
 #endif // _DEBUG
+
+    if( lpCmdLine != nullptr && wcsstr( lpCmdLine, L"/virtualcam-source-server" ) != nullptr )
+    {
+        return RunVirtualCameraSourceServer() ? 0 : 5;
+    }
+
+    if( lpCmdLine != nullptr && wcsstr( lpCmdLine, L"/virtualcam-probe" ) != nullptr )
+    {
+        return RunVirtualCameraProbe() ? 0 : 4;
+    }
 
     if( !ShowEula( APPNAME, NULL, NULL )) return 1;
 

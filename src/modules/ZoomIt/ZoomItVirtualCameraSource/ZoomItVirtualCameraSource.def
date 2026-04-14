@@ -1,0 +1,5 @@
+LIBRARY ZoomItVirtualCameraSource
+
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
