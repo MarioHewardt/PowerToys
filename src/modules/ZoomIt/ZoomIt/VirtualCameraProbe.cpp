@@ -818,7 +818,8 @@ bool RunVirtualCameraProbe()
         WaitForSingleObject( sourceServerProcess.get(), kProbeServerShutdownTimeoutMs );
     }
 
-    UnregisterProbeLocalServer();
+    // Don't unregister — the HKLM registration is needed for the real VCam feature.
+    // UnregisterProbeLocalServer();
 
     MFShutdown();
     if( SUCCEEDED( coInitHr ) )

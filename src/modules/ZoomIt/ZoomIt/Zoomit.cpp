@@ -20,6 +20,7 @@
 #include "BreakTimer.h"
 #include "PanoramaCapture.h"
 #include "VirtualCameraProbe.h"
+#include "VirtualCameraIds.h"
 #include <wtsapi32.h>
 #include <tlhelp32.h>
 #include <limits>
@@ -224,6 +225,11 @@ std::wstring	g_ScreenshotSaveLocation;
 winrt::IDirect3DDevice	g_RecordDevice{ nullptr };
 std::shared_ptr<VideoRecordingSession> g_RecordingSession = nullptr;
 std::shared_ptr<GifRecordingSession> g_GifRecordingSession = nullptr;
+
+// Virtual camera globals
+SelectRectangle g_VCamSelectRectangle;
+RECT g_VCamCropRect = {};
+
 type_pGetMonitorInfo		pGetMonitorInfo;
 type_MonitorFromPoint		pMonitorFromPoint;
 type_pSHAutoComplete		pSHAutoComplete;
@@ -5483,6 +5489,16 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 UnregisterAllHotkeys(GetParent(hDlg));
                 break;
 
+            }
+            else if( newVCamToggleKey &&
+                (!RegisterHotKey(GetParent(hDlg), VCAM_HOTKEY, newVCamToggleMod | MOD_NOREPEAT, newVCamToggleKey & 0xFF) ||
+                 !RegisterHotKey(GetParent(hDlg), VCAM_CROP_HOTKEY, (newVCamToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, newVCamToggleKey & 0xFF))) {
+
+                MessageBox(hDlg, L"The specified virtual camera hotkey is already in use.\nSelect a different virtual camera hotkey.",
+                    APPNAME, MB_ICONERROR);
+                UnregisterAllHotkeys(GetParent(hDlg));
+                break;
+
             } else {
 
                 g_BreakTimeout = newTimeout;
@@ -6555,6 +6571,259 @@ inline auto CopyBytesFromTexture(winrt::com_ptr<ID3D11Texture2D> const& texture,
 
 //----------------------------------------------------------------------------
 //
+// Virtual Camera start/stop
+//
+//----------------------------------------------------------------------------
+
+// Dynamic function pointers — loaded once
+using MFIsVCamSupportedFn = HRESULT (WINAPI*)( int type, BOOL* supported );
+using MFCreateVCamFn = HRESULT (WINAPI*)(
+    int type, int lifetime, int access,
+    LPCWSTR friendlyName, LPCWSTR sourceId,
+    const GUID* categories, ULONG categoryCount,
+    IUnknown** virtualCamera );
+
+// IMFVirtualCamera vtable offsets:
+// IUnknown: QI=0, AddRef=1, Release=2
+// IMFAttributes: GetItem=3 .. CopyAllItems=32  (30 methods)
+// IMFVirtualCamera: AddDeviceSourceInfo=33, AddProperty=34, AddRegistryEntry=35,
+//   Start=36, Stop=37, Remove=38, GetMediaSource=39, SendCameraProperty=40,
+//   CreateSyncEvent=41, CreateSyncSemaphore=42, Shutdown=43
+static HRESULT VCamStart( IUnknown* vcam ) {
+    auto** vtbl = *reinterpret_cast<void***>( vcam );
+    auto fn = reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(IUnknown*, void*)>( vtbl[36] );
+    return fn( vcam, nullptr );
+}
+static HRESULT VCamStop( IUnknown* vcam ) {
+    auto** vtbl = *reinterpret_cast<void***>( vcam );
+    auto fn = reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(IUnknown*)>( vtbl[37] );
+    return fn( vcam );
+}
+static HRESULT VCamRemove( IUnknown* vcam ) {
+    auto** vtbl = *reinterpret_cast<void***>( vcam );
+    auto fn = reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(IUnknown*)>( vtbl[38] );
+    return fn( vcam );
+}
+static HRESULT VCamShutdown( IUnknown* vcam ) {
+    auto** vtbl = *reinterpret_cast<void***>( vcam );
+    auto fn = reinterpret_cast<HRESULT(STDMETHODCALLTYPE*)(IUnknown*)>( vtbl[43] );
+    return fn( vcam );
+}
+
+static MFIsVCamSupportedFn pMFIsVCamSupported = nullptr;
+static MFCreateVCamFn pMFCreateVCam = nullptr;
+static IUnknown* g_VirtualCamera = nullptr;
+
+static std::wstring GetVCamSourceDllPath()
+{
+    wchar_t modulePath[MAX_PATH]{};
+    GetModuleFileNameW( nullptr, modulePath, MAX_PATH );
+    PathRemoveFileSpecW( modulePath );
+    return std::wstring( modulePath ) + L"\\ZoomItVirtualCameraSource.dll";
+}
+
+static bool EnsureVCamDllRegistered()
+{
+    // Check if already registered
+    wchar_t clsidStr[64]{};
+    StringFromGUID2( CLSID_ZoomItVirtualCameraProbeSource, clsidStr, 64 );
+    std::wstring keyPath = std::wstring( L"HKLM\\SOFTWARE\\Classes\\CLSID\\" ) + clsidStr;
+
+    // Quick check: try to open the key
+    HKEY testKey = nullptr;
+    std::wstring regKeyPath = std::wstring( L"SOFTWARE\\Classes\\CLSID\\" ) + clsidStr + L"\\InprocServer32";
+    if( RegOpenKeyExW( HKEY_LOCAL_MACHINE, regKeyPath.c_str(), 0, KEY_READ, &testKey ) == ERROR_SUCCESS )
+    {
+        RegCloseKey( testKey );
+        return true; // Already registered
+    }
+
+    // Need to register — requires elevation
+    std::wstring dllPath = GetVCamSourceDllPath();
+    if( GetFileAttributesW( dllPath.c_str() ) == INVALID_FILE_ATTRIBUTES )
+    {
+        OutputDebug( L"[VCam] DLL not found: %s\n", dllPath.c_str() );
+        return false;
+    }
+
+    std::wstring inprocPath = keyPath + L"\\InprocServer32";
+    std::wstring regArgs =
+        L"/c reg add \"" + keyPath + L"\" /ve /d \"ZoomIt Virtual Camera\" /f && "
+        L"reg add \"" + inprocPath + L"\" /ve /d \"" + dllPath + L"\" /f && "
+        L"reg add \"" + inprocPath + L"\" /v ThreadingModel /d Both /f";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof( sei );
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"cmd.exe";
+    sei.lpParameters = regArgs.c_str();
+    sei.nShow = SW_HIDE;
+
+    if( !ShellExecuteExW( &sei ) )
+    {
+        OutputDebug( L"[VCam] Registration elevation cancelled or failed: %lu\n", GetLastError() );
+        return false;
+    }
+
+    if( sei.hProcess )
+    {
+        WaitForSingleObject( sei.hProcess, 10000 );
+        DWORD exitCode = 1;
+        GetExitCodeProcess( sei.hProcess, &exitCode );
+        CloseHandle( sei.hProcess );
+        if( exitCode != 0 )
+        {
+            OutputDebug( L"[VCam] Registration failed, exit code: %lu\n", exitCode );
+            return false;
+        }
+    }
+
+    OutputDebug( L"[VCam] DLL registered under HKLM\n" );
+    return true;
+}
+
+static bool LoadVirtualCameraAPIs()
+{
+    if( pMFCreateVCam ) return true;
+
+    HMODULE hMod = LoadLibrarySafe( L"mfsensorgroup.dll", DLL_LOAD_LOCATION_SYSTEM );
+    if( !hMod ) return false;
+
+    pMFIsVCamSupported = reinterpret_cast<MFIsVCamSupportedFn>(
+        GetProcAddress( hMod, "MFIsVirtualCameraTypeSupported" ) );
+    pMFCreateVCam = reinterpret_cast<MFCreateVCamFn>(
+        GetProcAddress( hMod, "MFCreateVirtualCamera" ) );
+
+    return pMFIsVCamSupported && pMFCreateVCam;
+}
+
+void StartVirtualCamera( HWND hWnd )
+{
+    OutputDebug( L"[VCam] StartVirtualCamera\n" );
+
+    if( !LoadVirtualCameraAPIs() )
+    {
+        OutputDebug( L"[VCam] MF virtual camera APIs not available\n" );
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    BOOL supported = FALSE;
+    if( FAILED( pMFIsVCamSupported( 0 /*SoftwareCameraSource*/, &supported ) ) || !supported )
+    {
+        MessageBox( hWnd, L"Virtual camera is not supported on this system.\nWindows 11 is required.",
+            APPNAME, MB_OK | MB_ICONERROR );
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    // Select region — pass nullptr as owner so the border survives focus changes
+    g_VCamSelectRectangle.AspectRatio( 16.0 / 9.0 );
+    auto canceled = !g_VCamSelectRectangle.Start( nullptr );
+    if( canceled )
+    {
+        OutputDebug( L"[VCam] Region selection cancelled\n" );
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    g_VCamCropRect = g_VCamSelectRectangle.SelectedRect();
+    OutputDebug( L"[VCam] Selected region: (%d,%d)-(%d,%d)\n",
+        g_VCamCropRect.left, g_VCamCropRect.top,
+        g_VCamCropRect.right, g_VCamCropRect.bottom );
+
+    // Stop the selection overlay before creating the camera — FrameServerMonitor
+    // startup causes focus changes that destroy the border window.  We'll
+    // recreate it as a fullMonitor-style border after the camera starts.
+    g_VCamSelectRectangle.Stop();
+
+    // Ensure the source DLL is registered under HKLM (FrameServer needs it)
+    if( !EnsureVCamDllRegistered() )
+    {
+        OutputDebug( L"[VCam] DLL registration failed\n" );
+        MessageBox( hWnd, L"Virtual camera DLL registration failed.\nPlease run as administrator or register the DLL manually.",
+            APPNAME, MB_OK | MB_ICONERROR );
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    // Create and start the virtual camera
+    wchar_t clsidStr[64]{};
+    StringFromGUID2( CLSID_ZoomItVirtualCameraProbeSource, clsidStr, 64 );
+
+    HRESULT hr = pMFCreateVCam(
+        0, // MFVirtualCameraType_SoftwareCameraSource
+        0, // MFVirtualCameraLifetime_Session
+        0, // MFVirtualCameraAccess_CurrentUser
+        L"ZoomIt Virtual Camera",
+        clsidStr,
+        nullptr, 0,
+        &g_VirtualCamera );
+
+    if( FAILED( hr ) )
+    {
+        OutputDebug( L"[VCam] MFCreateVirtualCamera failed: 0x%08X\n", static_cast<unsigned>( hr ) );
+        wchar_t msg[256];
+        swprintf_s( msg, L"Failed to create virtual camera: 0x%08X", static_cast<unsigned>( hr ) );
+        MessageBox( hWnd, msg, APPNAME, MB_OK | MB_ICONERROR );
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    hr = VCamStart( g_VirtualCamera );
+    if( FAILED( hr ) )
+    {
+        OutputDebug( L"[VCam] IMFVirtualCamera::Start failed: 0x%08X\n", static_cast<unsigned>( hr ) );
+        wchar_t msg[256];
+        swprintf_s( msg, L"Failed to start virtual camera: 0x%08X", static_cast<unsigned>( hr ) );
+        MessageBox( hWnd, msg, APPNAME, MB_OK | MB_ICONERROR );
+        VCamShutdown( g_VirtualCamera );
+        g_VirtualCamera->Release();
+        g_VirtualCamera = nullptr;
+        g_VCamToggle = FALSE;
+        return;
+    }
+
+    // Now show a persistent border around the selected region.
+    // Use fullMonitor=true mode which creates a non-interactive border
+    // that won't be killed by focus changes, then reposition it to
+    // match the crop rect.
+    g_VCamSelectRectangle.Start( nullptr, true );
+    // Reposition the border to the selected region
+    if( g_VCamSelectRectangle.Window() )
+    {
+        int w = g_VCamCropRect.right - g_VCamCropRect.left;
+        int h = g_VCamCropRect.bottom - g_VCamCropRect.top;
+        MoveWindow( g_VCamSelectRectangle.Window(), g_VCamCropRect.left, g_VCamCropRect.top, w, h, TRUE );
+    }
+    g_VCamSelectRectangle.SetRecordingActive();
+
+    OutputDebug( L"[VCam] Virtual camera started successfully\n" );
+}
+
+void StopVirtualCamera()
+{
+    OutputDebug( L"[VCam] StopVirtualCamera\n" );
+
+    if( g_VirtualCamera )
+    {
+        VCamStop( g_VirtualCamera );
+        VCamRemove( g_VirtualCamera );
+        VCamShutdown( g_VirtualCamera );
+        g_VirtualCamera->Release();
+        g_VirtualCamera = nullptr;
+    }
+
+    g_VCamSelectRectangle.Stop();
+    g_VCamCropRect = {};
+
+    OutputDebug( L"[VCam] Virtual camera stopped\n" );
+}
+
+
+//----------------------------------------------------------------------------
+//
 // StopRecording
 //
 //----------------------------------------------------------------------------
@@ -7502,6 +7771,14 @@ LRESULT APIENTRY MainWndProc(
                     APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
             }
+            if( g_VCamToggleKey &&
+                (!RegisterHotKey(hWnd, VCAM_HOTKEY, g_VCamToggleMod | MOD_NOREPEAT, g_VCamToggleKey & 0xFF) ||
+                 !RegisterHotKey(hWnd, VCAM_CROP_HOTKEY, (g_VCamToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF))) {
+
+                MessageBox(hWnd, L"The specified virtual camera hotkey is already in use.\nSelect a different virtual camera hotkey.",
+                    APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+            }
             if( showOptions ) {
 
                 SendMessage( hWnd, WM_COMMAND, IDC_OPTIONS, 0 );
@@ -8270,12 +8547,12 @@ LRESULT APIENTRY MainWndProc(
             if( g_VCamToggle == FALSE )
             {
                 g_VCamToggle = TRUE;
-                OutputDebug( L"[VCam] Virtual camera started (placeholder)\n" );
+                StartVirtualCamera( hWnd );
             }
             else
             {
                 g_VCamToggle = FALSE;
-                OutputDebug( L"[VCam] Virtual camera stopped (placeholder)\n" );
+                StopVirtualCamera();
             }
             break;
         }
@@ -10168,6 +10445,15 @@ LRESULT APIENTRY MainWndProc(
                 !RegisterHotKey(hWnd, RECORD_WINDOW_HOTKEY, (g_RecordToggleMod ^ MOD_ALT) | MOD_NOREPEAT, g_RecordToggleKey & 0xFF))
             {
                 MessageBox(hWnd, L"The specified record hotkey is already in use.\nSelect a different record hotkey.", APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+            }
+        }
+        if (g_VCamToggleKey)
+        {
+            if (!RegisterHotKey(hWnd, VCAM_HOTKEY, g_VCamToggleMod | MOD_NOREPEAT, g_VCamToggleKey & 0xFF) ||
+                !RegisterHotKey(hWnd, VCAM_CROP_HOTKEY, (g_VCamToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF))
+            {
+                MessageBox(hWnd, L"The specified virtual camera hotkey is already in use.\nSelect a different virtual camera hotkey.", APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
             }
         }
