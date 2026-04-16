@@ -2,11 +2,10 @@
 //
 // BackgroundBlur.h
 //
-// Performs person segmentation using ONNX Runtime and applies either a
-// Gaussian blur or a custom background image to the background of a BGRA
-// webcam frame.  The segmentation model (SelfieSegmentation or similar)
-// runs on CPU via ONNX Runtime's default execution provider, keeping the
-// GPU free for the recording pipeline.
+// Performs person segmentation using Windows ML (Windows.AI.MachineLearning)
+// and applies either a Gaussian blur or a custom background image to the
+// background of a BGRA webcam frame.  The segmentation model runs on CPU
+// via the Windows ML default device, keeping the GPU free for recording.
 //
 // Copyright (C) Mark Russinovich
 // Sysinternals - www.sysinternals.com
@@ -17,7 +16,7 @@
 #include <vector>
 #include <string>
 #include <cstdint>
-#include <onnxruntime_c_api.h>
+#include <winrt/Windows.AI.MachineLearning.h>
 
 // Background processing mode for the webcam overlay.
 enum class WebcamBackgroundMode : uint32_t
@@ -30,8 +29,8 @@ enum class WebcamBackgroundMode : uint32_t
 class BackgroundBlur
 {
 public:
-    BackgroundBlur();
-    ~BackgroundBlur();
+    BackgroundBlur() = default;
+    ~BackgroundBlur() = default;
 
     // Initialize the ONNX model.  modelPath must point to a valid .onnx
     // segmentation model file.  Returns true on success.
@@ -73,26 +72,24 @@ private:
     // Scale the loaded background image to the given dimensions (cached).
     void EnsureScaledBgImage( uint32_t width, uint32_t height );
 
-    const OrtApi*           m_ortApi = nullptr;
-    OrtEnv*                 m_env = nullptr;
-    OrtSessionOptions*      m_sessionOptions = nullptr;
-    OrtSession*             m_session = nullptr;
-    OrtMemoryInfo*          m_memoryInfo = nullptr;
+    // Windows ML objects.
+    winrt::Windows::AI::MachineLearning::LearningModel          m_model{ nullptr };
+    winrt::Windows::AI::MachineLearning::LearningModelSession   m_session{ nullptr };
+    winrt::Windows::AI::MachineLearning::LearningModelBinding   m_binding{ nullptr };
+    winrt::hstring                                              m_inputName;
+    winrt::hstring                                              m_outputName;
 
     // Model metadata (detected from the loaded model).
     int64_t                 m_modelInputWidth = 256;
     int64_t                 m_modelInputHeight = 256;
     int64_t                 m_modelInputChannels = 3;
-    std::string             m_inputName;
-    std::string             m_outputName;
+    bool                    m_inputIsNchw = true; // true = [1,C,H,W], false = [1,H,W,C]
 
     // Reusable buffers to avoid per-frame allocations.
     std::vector<float>      m_inputTensor;      // RGB float [1,3,H,W] or [1,H,W,3]
     std::vector<float>      m_mask;             // Segmentation mask [width*height]
     std::vector<uint8_t>    m_blurredFrame;     // Temporary blurred copy
     std::vector<uint8_t>    m_tempFrame;        // Second temp buffer for blur passes
-    std::vector<float>      m_resizedRgb;       // Resized frame for model input
-    bool                    m_inputIsNchw = true; // true = [1,C,H,W], false = [1,H,W,C]
 
     // Background image (original resolution, BGRA).
     std::vector<uint8_t>    m_bgImage;

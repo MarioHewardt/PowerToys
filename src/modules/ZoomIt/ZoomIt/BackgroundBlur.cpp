@@ -2,11 +2,11 @@
 //
 // BackgroundBlur.cpp
 //
-// ONNX Runtime-based person segmentation and background blur for the
-// webcam overlay.  Uses a lightweight ONNX segmentation model (e.g.
-// MediaPipe SelfieSegmentation or SINet) to produce a per-pixel person
-// mask, then blurs the background using an iterated box blur (which
-// approximates a Gaussian blur).
+// Windows ML-based person segmentation and background blur for the
+// webcam overlay.  Uses the built-in Windows.AI.MachineLearning API
+// to load an ONNX segmentation model (e.g. MediaPipe SelfieSegmentation)
+// and produce a per-pixel person mask, then blurs or replaces the
+// background using an iterated box blur or a user-chosen image.
 //
 // Copyright (C) Mark Russinovich
 // Sysinternals - www.sysinternals.com
@@ -19,162 +19,96 @@
 #include <wincodec.h>
 #include <wil/com.h>
 
+namespace winml = winrt::Windows::AI::MachineLearning;
+namespace wf    = winrt::Windows::Foundation::Collections;
+
 // Defined in Zoomit.cpp; compiles to nothing in Release builds.
 void OutputDebug(const TCHAR* format, ...);
 
 //----------------------------------------------------------------------------
-// BackgroundBlur::BackgroundBlur
-//----------------------------------------------------------------------------
-BackgroundBlur::BackgroundBlur()
-{
-    m_ortApi = OrtGetApiBase()->GetApi( ORT_API_VERSION );
-}
-
-//----------------------------------------------------------------------------
-// BackgroundBlur::~BackgroundBlur
-//----------------------------------------------------------------------------
-BackgroundBlur::~BackgroundBlur()
-{
-    if( m_session )       m_ortApi->ReleaseSession( m_session );
-    if( m_sessionOptions ) m_ortApi->ReleaseSessionOptions( m_sessionOptions );
-    if( m_memoryInfo )    m_ortApi->ReleaseMemoryInfo( m_memoryInfo );
-    if( m_env )           m_ortApi->ReleaseEnv( m_env );
-}
-
-//----------------------------------------------------------------------------
 // BackgroundBlur::Initialize
 //
-// Loads the ONNX segmentation model and inspects its input/output
-// tensor shapes to auto-configure preprocessing.
+// Loads the ONNX segmentation model via Windows ML and inspects its
+// input/output tensor shapes to auto-configure preprocessing.
 //----------------------------------------------------------------------------
 bool BackgroundBlur::Initialize( const wchar_t* modelPath )
 {
-    if( !m_ortApi )
+    try
     {
-        OutputDebug( L"[BackgroundBlur] ONNX Runtime API not available\n" );
-        return false;
-    }
+        // Load the model from file.
+        m_model = winml::LearningModel::LoadFromFilePath( modelPath );
 
-    OrtStatus* status = nullptr;
+        // Create a CPU-only session (no DirectML).
+        winml::LearningModelDevice cpuDevice( winml::LearningModelDeviceKind::Cpu );
+        m_session = winml::LearningModelSession( m_model, cpuDevice );
+        m_binding = winml::LearningModelBinding( m_session );
 
-    // Create environment.
-    status = m_ortApi->CreateEnv( ORT_LOGGING_LEVEL_WARNING, "BackgroundBlur", &m_env );
-    if( status )
-    {
-        OutputDebug( L"[BackgroundBlur] CreateEnv failed: %S\n", m_ortApi->GetErrorMessage( status ) );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-
-    // Create session options (CPU execution, single thread for low latency).
-    status = m_ortApi->CreateSessionOptions( &m_sessionOptions );
-    if( status )
-    {
-        OutputDebug( L"[BackgroundBlur] CreateSessionOptions failed\n" );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-    m_ortApi->SetIntraOpNumThreads( m_sessionOptions, 2 );
-    m_ortApi->SetSessionGraphOptimizationLevel( m_sessionOptions, ORT_ENABLE_ALL );
-
-    // Load the model.
-    status = m_ortApi->CreateSession( m_env, modelPath, m_sessionOptions, &m_session );
-    if( status )
-    {
-        OutputDebug( L"[BackgroundBlur] CreateSession failed: %S\n", m_ortApi->GetErrorMessage( status ) );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-
-    // Create memory info for CPU tensors.
-    status = m_ortApi->CreateCpuMemoryInfo( OrtArenaAllocator, OrtMemTypeDefault, &m_memoryInfo );
-    if( status )
-    {
-        OutputDebug( L"[BackgroundBlur] CreateCpuMemoryInfo failed\n" );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-
-    // Get input tensor shape.
-    {
-        OrtAllocator* allocator = nullptr;
-        m_ortApi->GetAllocatorWithDefaultOptions( &allocator );
-
-        // Input name.
-        char* inputNameRaw = nullptr;
-        status = m_ortApi->SessionGetInputName( m_session, 0, allocator, &inputNameRaw );
-        if( status )
+        // Get input feature descriptor.
+        auto inputFeatures = m_model.InputFeatures();
+        if( inputFeatures.Size() == 0 )
         {
-            OutputDebug( L"[BackgroundBlur] SessionGetInputName failed\n" );
-            m_ortApi->ReleaseStatus( status );
+            OutputDebug( L"[BackgroundBlur] Model has no input features\n" );
             return false;
         }
-        m_inputName = inputNameRaw;
-        allocator->Free( allocator, inputNameRaw );
+        auto inputDesc = inputFeatures.GetAt( 0 );
+        m_inputName = inputDesc.Name();
 
-        // Output name.
-        char* outputNameRaw = nullptr;
-        status = m_ortApi->SessionGetOutputName( m_session, 0, allocator, &outputNameRaw );
-        if( status )
+        // Inspect input tensor shape.
+        auto tensorDesc = inputDesc.as<winml::ITensorFeatureDescriptor>();
+        auto shape = tensorDesc.Shape();
+        if( shape.Size() == 4 )
         {
-            OutputDebug( L"[BackgroundBlur] SessionGetOutputName failed\n" );
-            m_ortApi->ReleaseStatus( status );
-            return false;
-        }
-        m_outputName = outputNameRaw;
-        allocator->Free( allocator, outputNameRaw );
-
-        // Input shape.
-        OrtTypeInfo* typeInfo = nullptr;
-        m_ortApi->SessionGetInputTypeInfo( m_session, 0, &typeInfo );
-        const OrtTensorTypeAndShapeInfo* tensorInfo = nullptr;
-        m_ortApi->CastTypeInfoToTensorInfo( typeInfo, &tensorInfo );
-
-        size_t dimCount = 0;
-        m_ortApi->GetDimensionsCount( tensorInfo, &dimCount );
-        std::vector<int64_t> dims( dimCount );
-        m_ortApi->GetDimensions( tensorInfo, dims.data(), dimCount );
-
-        // Detect layout: [1, C, H, W] (NCHW) vs [1, H, W, C] (NHWC).
-        if( dimCount == 4 )
-        {
-            if( dims[1] == 3 || dims[1] == 1 )
+            if( shape.GetAt( 1 ) == 3 || shape.GetAt( 1 ) == 1 )
             {
                 // NCHW layout.
                 m_inputIsNchw = true;
-                m_modelInputChannels = dims[1];
-                m_modelInputHeight = dims[2] > 0 ? dims[2] : 256;
-                m_modelInputWidth = dims[3] > 0 ? dims[3] : 256;
+                m_modelInputChannels = shape.GetAt( 1 );
+                m_modelInputHeight = shape.GetAt( 2 ) > 0 ? shape.GetAt( 2 ) : 256;
+                m_modelInputWidth  = shape.GetAt( 3 ) > 0 ? shape.GetAt( 3 ) : 256;
             }
             else
             {
                 // NHWC layout.
                 m_inputIsNchw = false;
-                m_modelInputHeight = dims[1] > 0 ? dims[1] : 256;
-                m_modelInputWidth = dims[2] > 0 ? dims[2] : 256;
-                m_modelInputChannels = dims[3];
+                m_modelInputHeight   = shape.GetAt( 1 ) > 0 ? shape.GetAt( 1 ) : 256;
+                m_modelInputWidth    = shape.GetAt( 2 ) > 0 ? shape.GetAt( 2 ) : 256;
+                m_modelInputChannels = shape.GetAt( 3 );
             }
         }
 
-        m_ortApi->ReleaseTypeInfo( typeInfo );
+        // Get output feature name.
+        auto outputFeatures = m_model.OutputFeatures();
+        if( outputFeatures.Size() == 0 )
+        {
+            OutputDebug( L"[BackgroundBlur] Model has no output features\n" );
+            return false;
+        }
+        m_outputName = outputFeatures.GetAt( 0 ).Name();
+
+        OutputDebug( L"[BackgroundBlur] Model loaded: input=%s %lldx%lld (ch=%lld, %s)\n",
+                     m_inputName.c_str(), m_modelInputWidth, m_modelInputHeight,
+                     m_modelInputChannels, m_inputIsNchw ? L"NCHW" : L"NHWC" );
+
+        // Pre-allocate input tensor buffer.
+        m_inputTensor.resize( static_cast<size_t>( m_modelInputChannels * m_modelInputHeight * m_modelInputWidth ) );
+
+        return true;
     }
-
-    OutputDebug( L"[BackgroundBlur] Model loaded: input=%S %lldx%lld (ch=%lld, %s)\n",
-                 m_inputName.c_str(), m_modelInputWidth, m_modelInputHeight,
-                 m_modelInputChannels, m_inputIsNchw ? L"NCHW" : L"NHWC" );
-
-    // Pre-allocate buffers.
-    m_inputTensor.resize( static_cast<size_t>( m_modelInputChannels * m_modelInputHeight * m_modelInputWidth ) );
-
-    return true;
+    catch( winrt::hresult_error const& ex )
+    {
+        OutputDebug( L"[BackgroundBlur] Initialize failed: %s (0x%08X)\n", ex.message().c_str(), ex.code().value );
+        m_session = nullptr;
+        m_model = nullptr;
+        return false;
+    }
 }
 
 //----------------------------------------------------------------------------
 // BackgroundBlur::RunSegmentation
 //
 // Resizes the BGRA frame to the model's expected input size, converts
-// to float RGB, runs inference, and produces a float mask in m_mask
-// where 1.0 = person, 0.0 = background.
+// to float RGB, runs inference via Windows ML, and produces a float mask
+// in m_mask where 1.0 = person, 0.0 = background.
 //----------------------------------------------------------------------------
 bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height )
 {
@@ -183,7 +117,6 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
     const int64_t mC = m_modelInputChannels;
 
     // Resize BGRA → model-sized float RGB using nearest-neighbor.
-    // This is intentionally simple; the model is tolerant of basic scaling.
     for( int64_t y = 0; y < mH; y++ )
     {
         uint32_t srcY = static_cast<uint32_t>( y * height / mH );
@@ -197,14 +130,12 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
 
             if( m_inputIsNchw )
             {
-                // [1, C, H, W]
                 m_inputTensor[0 * mH * mW + y * mW + x] = r;
                 if( mC > 1 ) m_inputTensor[1 * mH * mW + y * mW + x] = g;
                 if( mC > 2 ) m_inputTensor[2 * mH * mW + y * mW + x] = b;
             }
             else
             {
-                // [1, H, W, C]
                 size_t idx = static_cast<size_t>( y * mW + x ) * mC;
                 m_inputTensor[idx + 0] = r;
                 if( mC > 1 ) m_inputTensor[idx + 1] = g;
@@ -213,120 +144,93 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
         }
     }
 
-    // Create input tensor.
-    int64_t inputShape[] = { 1, m_inputIsNchw ? mC : mH, m_inputIsNchw ? mH : mW, m_inputIsNchw ? mW : mC };
-    OrtValue* inputTensor = nullptr;
-    OrtStatus* status = m_ortApi->CreateTensorWithDataAsOrtValue(
-        m_memoryInfo,
-        m_inputTensor.data(),
-        m_inputTensor.size() * sizeof( float ),
-        inputShape, 4,
-        ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-        &inputTensor );
-    if( status )
+    try
     {
-        OutputDebug( L"[BackgroundBlur] CreateTensor failed: %S\n", m_ortApi->GetErrorMessage( status ) );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-
-    // Run inference.
-    const char* inputNames[] = { m_inputName.c_str() };
-    const char* outputNames[] = { m_outputName.c_str() };
-    OrtValue* outputTensor = nullptr;
-
-    status = m_ortApi->Run( m_session, nullptr, inputNames, (const OrtValue* const*)&inputTensor, 1,
-                            outputNames, 1, &outputTensor );
-    m_ortApi->ReleaseValue( inputTensor );
-
-    if( status )
-    {
-        OutputDebug( L"[BackgroundBlur] Run failed: %S\n", m_ortApi->GetErrorMessage( status ) );
-        m_ortApi->ReleaseStatus( status );
-        return false;
-    }
-
-    // Extract output mask.  The output is typically [1, 1, H, W] or [1, H, W, 1]
-    // with values in [0, 1] where higher = person.
-    float* outputData = nullptr;
-    m_ortApi->GetTensorMutableData( outputTensor, reinterpret_cast<void**>( &outputData ) );
-
-    OrtTensorTypeAndShapeInfo* outputInfo = nullptr;
-    m_ortApi->GetTensorTypeAndShape( outputTensor, &outputInfo );
-    size_t outputElementCount = 0;
-    m_ortApi->GetTensorShapeElementCount( outputInfo, &outputElementCount );
-
-    // Get output dimensions to determine if we need to handle multi-class output.
-    size_t outDimCount = 0;
-    m_ortApi->GetDimensionsCount( outputInfo, &outDimCount );
-    std::vector<int64_t> outDims( outDimCount );
-    m_ortApi->GetDimensions( outputInfo, outDims.data(), outDimCount );
-    m_ortApi->ReleaseTensorTypeAndShapeInfo( outputInfo );
-
-    // Determine output mask dimensions.
-    int64_t outH = mH, outW = mW;
-    int64_t numClasses = 1;
-    if( outDimCount == 4 )
-    {
-        // Could be [1,1,H,W], [1,H,W,1], or [1,2,H,W] (2-class).
-        if( outDims[1] <= 2 && outDims[2] > 2 )
-        {
-            // [1, classes, H, W]
-            numClasses = outDims[1];
-            outH = outDims[2];
-            outW = outDims[3];
-        }
+        // Create the input tensor shape.
+        std::vector<int64_t> inputShape;
+        if( m_inputIsNchw )
+            inputShape = { 1, mC, mH, mW };
         else
-        {
-            // [1, H, W, classes]
-            outH = outDims[1];
-            outW = outDims[2];
-            numClasses = outDims[3];
-        }
-    }
-    else if( outDimCount == 3 )
-    {
-        // [1, H, W]
-        outH = outDims[1];
-        outW = outDims[2];
-    }
+            inputShape = { 1, mH, mW, mC };
 
-    // Resize output mask to frame dimensions.
-    m_mask.resize( static_cast<size_t>( width ) * height );
-    for( uint32_t y = 0; y < height; y++ )
-    {
-        int64_t srcY = static_cast<int64_t>( y ) * outH / height;
-        for( uint32_t x = 0; x < width; x++ )
-        {
-            int64_t srcX = static_cast<int64_t>( x ) * outW / width;
-            float personScore;
+        // Create a TensorFloat from our data.
+        auto inputTensor = winml::TensorFloat::CreateFromArray(
+            inputShape, winrt::array_view<const float>( m_inputTensor.data(),
+                                                         m_inputTensor.data() + m_inputTensor.size() ) );
 
-            if( numClasses == 1 )
+        // Bind input and evaluate.
+        m_binding.Clear();
+        m_binding.Bind( m_inputName, inputTensor );
+
+        auto result = m_session.Evaluate( m_binding, L"" );
+
+        // Extract output tensor.
+        auto outputTensor = result.Outputs().Lookup( m_outputName ).as<winml::TensorFloat>();
+        auto outputShape = outputTensor.Shape();
+        auto outputView = outputTensor.GetAsVectorView();
+
+        // Determine output mask dimensions.
+        int64_t outH = mH, outW = mW;
+        int64_t numClasses = 1;
+        if( outputShape.Size() == 4 )
+        {
+            if( outputShape.GetAt( 1 ) <= 2 && outputShape.GetAt( 2 ) > 2 )
             {
-                // Single-channel output: value is person confidence.
-                personScore = outputData[srcY * outW + srcX];
+                // [1, classes, H, W]
+                numClasses = outputShape.GetAt( 1 );
+                outH = outputShape.GetAt( 2 );
+                outW = outputShape.GetAt( 3 );
             }
             else
             {
-                // Two-class output: [background, person].
-                // Person is class 1.
-                float bg = outputData[0 * outH * outW + srcY * outW + srcX];
-                float fg = outputData[1 * outH * outW + srcY * outW + srcX];
-                // Softmax.
-                float maxVal = (std::max)( bg, fg );
-                float expBg = expf( bg - maxVal );
-                float expFg = expf( fg - maxVal );
-                personScore = expFg / ( expBg + expFg );
+                // [1, H, W, classes]
+                outH = outputShape.GetAt( 1 );
+                outW = outputShape.GetAt( 2 );
+                numClasses = outputShape.GetAt( 3 );
             }
-
-            // Clamp to [0, 1].
-            personScore = (std::max)( 0.0f, (std::min)( 1.0f, personScore ) );
-            m_mask[static_cast<size_t>( y ) * width + x] = personScore;
         }
-    }
+        else if( outputShape.Size() == 3 )
+        {
+            outH = outputShape.GetAt( 1 );
+            outW = outputShape.GetAt( 2 );
+        }
 
-    m_ortApi->ReleaseValue( outputTensor );
-    return true;
+        // Resize output mask to frame dimensions.
+        m_mask.resize( static_cast<size_t>( width ) * height );
+        for( uint32_t y = 0; y < height; y++ )
+        {
+            int64_t srcY = static_cast<int64_t>( y ) * outH / height;
+            for( uint32_t x = 0; x < width; x++ )
+            {
+                int64_t srcX = static_cast<int64_t>( x ) * outW / width;
+                float personScore;
+
+                if( numClasses == 1 )
+                {
+                    personScore = outputView.GetAt( static_cast<uint32_t>( srcY * outW + srcX ) );
+                }
+                else
+                {
+                    float bg = outputView.GetAt( static_cast<uint32_t>( 0 * outH * outW + srcY * outW + srcX ) );
+                    float fg = outputView.GetAt( static_cast<uint32_t>( 1 * outH * outW + srcY * outW + srcX ) );
+                    float maxVal = (std::max)( bg, fg );
+                    float expBg = expf( bg - maxVal );
+                    float expFg = expf( fg - maxVal );
+                    personScore = expFg / ( expBg + expFg );
+                }
+
+                personScore = (std::max)( 0.0f, (std::min)( 1.0f, personScore ) );
+                m_mask[static_cast<size_t>( y ) * width + x] = personScore;
+            }
+        }
+
+        return true;
+    }
+    catch( winrt::hresult_error const& ex )
+    {
+        OutputDebug( L"[BackgroundBlur] Evaluate failed: %s (0x%08X)\n", ex.message().c_str(), ex.code().value );
+        return false;
+    }
 }
 
 //----------------------------------------------------------------------------
