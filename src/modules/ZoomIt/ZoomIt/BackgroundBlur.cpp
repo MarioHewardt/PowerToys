@@ -200,10 +200,9 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
             outW = outputShape.GetAt( 2 );
         }
 
-        // Build model-resolution mask first, apply all post-processing
+        // Build model-resolution mask first, apply sigmoid sharpening
         // at model resolution (e.g. 256×256 = 65K pixels), then upscale
-        // to frame resolution.  This is ~5× faster than processing at
-        // full frame size.
+        // to frame resolution.
         const size_t modelPixels = static_cast<size_t>( outH ) * outW;
         m_erodeBuf.resize( modelPixels );
 
@@ -236,40 +235,6 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
                 personScore = 1.0f / ( 1.0f + expf( -kSigmoidStrength * ( personScore - kSigmoidCenter ) ) );
 
                 m_erodeBuf[static_cast<size_t>( y * outW + x )] = personScore;
-            }
-        }
-
-        // Erode at model resolution: shrink person boundary inward so
-        // nearby background objects aren't absorbed.  Radius 1 at 256×256
-        // is proportionally equivalent to ~2-3 px at frame resolution.
-        constexpr int kErodeRadius = 1;
-        m_erodeTmp.resize( modelPixels );
-
-        // Horizontal min pass.
-        for( int64_t y = 0; y < outH; y++ )
-        {
-            for( int64_t x = 0; x < outW; x++ )
-            {
-                float minVal = 1.0f;
-                int64_t x0 = (std::max)( static_cast<int64_t>( 0 ), x - kErodeRadius );
-                int64_t x1 = (std::min)( outW - 1, x + kErodeRadius );
-                for( int64_t xx = x0; xx <= x1; xx++ )
-                    minVal = (std::min)( minVal, m_erodeBuf[y * outW + xx] );
-                m_erodeTmp[y * outW + x] = minVal;
-            }
-        }
-
-        // Vertical min pass.
-        for( int64_t y = 0; y < outH; y++ )
-        {
-            for( int64_t x = 0; x < outW; x++ )
-            {
-                float minVal = 1.0f;
-                int64_t y0 = (std::max)( static_cast<int64_t>( 0 ), y - kErodeRadius );
-                int64_t y1 = (std::min)( outH - 1, y + kErodeRadius );
-                for( int64_t yy = y0; yy <= y1; yy++ )
-                    minVal = (std::min)( minVal, m_erodeTmp[yy * outW + x] );
-                m_erodeBuf[y * outW + x] = minVal;
             }
         }
 
