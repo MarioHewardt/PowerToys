@@ -61,7 +61,8 @@ DWORD   g_WebcamPosition = 3; // 0=TL, 1=TR, 2=BL, 3=BR
 DWORD   g_WebcamSize = 1;     // 0=Small(15%), 1=Medium(25%), 2=Large(33%), 3=XLarge(50%)
 DWORD   g_WebcamShape = 0;    // 0=Square, 1=RoundedRect, 2=RoundedSquare, 3=Circle
 TCHAR   g_WebcamDeviceSymLink[MAX_PATH] = {0};
-BOOLEAN g_WebcamBackgroundBlur = FALSE;
+DWORD   g_WebcamBackgroundMode = 0;     // 0=None, 1=Blur, 2=Image
+TCHAR   g_WebcamBackgroundImage[MAX_PATH] = {0};
 BOOLEAN g_RecordAspectRatio = FALSE; // Lock region selection to 16:9
 TCHAR	g_RecordingSaveLocationBuffer[MAX_PATH] = {0};
 TCHAR	g_ScreenshotSaveLocationBuffer[MAX_PATH] = {0};
@@ -120,7 +121,8 @@ REG_SETTING RegSettings[] = {
     { L"WebcamSize", SETTING_TYPE_DWORD, 0, &g_WebcamSize, static_cast<DOUBLE>(g_WebcamSize) },
     { L"WebcamShape", SETTING_TYPE_DWORD, 0, &g_WebcamShape, static_cast<DOUBLE>(g_WebcamShape) },
     { L"WebcamDeviceSymLink", SETTING_TYPE_STRING, sizeof(g_WebcamDeviceSymLink), g_WebcamDeviceSymLink, static_cast<DOUBLE>(0) },
-    { L"WebcamBackgroundBlur", SETTING_TYPE_BOOLEAN, 0, &g_WebcamBackgroundBlur, static_cast<DOUBLE>(g_WebcamBackgroundBlur) },
+    { L"WebcamBackgroundMode", SETTING_TYPE_DWORD, 0, &g_WebcamBackgroundMode, static_cast<DOUBLE>(g_WebcamBackgroundMode) },
+    { L"WebcamBackgroundImage", SETTING_TYPE_STRING, sizeof(g_WebcamBackgroundImage), g_WebcamBackgroundImage, static_cast<DOUBLE>(0) },
     { L"RecordAspectRatio", SETTING_TYPE_BOOLEAN, 0, &g_RecordAspectRatio, static_cast<DOUBLE>(g_RecordAspectRatio) },
     { L"RecordingSaveLocation", SETTING_TYPE_STRING, sizeof(g_RecordingSaveLocationBuffer), g_RecordingSaveLocationBuffer, static_cast<DOUBLE>(0) },
     { L"ScreenshotSaveLocation", SETTING_TYPE_STRING, sizeof(g_ScreenshotSaveLocationBuffer), g_ScreenshotSaveLocationBuffer, static_cast<DOUBLE>(0) },

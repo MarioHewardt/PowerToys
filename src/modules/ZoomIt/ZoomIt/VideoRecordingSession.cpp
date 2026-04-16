@@ -32,7 +32,8 @@ extern DWORD g_WebcamPosition;
 extern DWORD g_WebcamSize;
 extern DWORD g_WebcamShape;
 extern TCHAR g_WebcamDeviceSymLink[MAX_PATH];
-extern BOOLEAN g_WebcamBackgroundBlur;
+extern DWORD g_WebcamBackgroundMode;
+extern TCHAR g_WebcamBackgroundImage[];
 extern class ClassRegistry reg;
 extern REG_SETTING RegSettings[];
 extern HINSTANCE g_hInstance;
@@ -1070,7 +1071,8 @@ VideoRecordingSession::VideoRecordingSession(
             static_cast<WebcamCapture::Size>( g_WebcamSize ),
             webcamShape,
             isFullScreenRecording,
-            g_WebcamBackgroundBlur != FALSE );
+            static_cast<WebcamBackgroundMode>( g_WebcamBackgroundMode ),
+            g_WebcamBackgroundImage );
         m_webcamCapture->Start();
         RecDiag( L"Constructor: WebcamCapture::Start() returned\n" );
     }

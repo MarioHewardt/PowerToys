@@ -16,6 +16,8 @@
 #include "BackgroundBlur.h"
 #include <algorithm>
 #include <cstring>
+#include <wincodec.h>
+#include <wil/com.h>
 
 // Defined in Zoomit.cpp; compiles to nothing in Release builds.
 void OutputDebug(const TCHAR* format, ...);
@@ -419,35 +421,216 @@ void BackgroundBlur::ApplyBlurWithMask( uint8_t* bgraPixels, uint32_t width, uin
 {
     const size_t frameBytes = static_cast<size_t>( width ) * height * 4;
     m_blurredFrame.resize( frameBytes );
-    std::vector<uint8_t> temp( frameBytes );
+    m_tempFrame.resize( frameBytes );
 
-    // 3 passes of box blur → approximate Gaussian.
-    // Pass 1: original → blurred.
+    // 2 passes of box blur → approximate Gaussian (fast enough for small overlays).
     HorizontalBoxBlur( bgraPixels, m_blurredFrame.data(), width, height, blurRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), temp.data(), width, height, blurRadius );
-    // Pass 2.
-    HorizontalBoxBlur( temp.data(), m_blurredFrame.data(), width, height, blurRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), temp.data(), width, height, blurRadius );
-    // Pass 3.
-    HorizontalBoxBlur( temp.data(), m_blurredFrame.data(), width, height, blurRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), temp.data(), width, height, blurRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, blurRadius );
+    HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), width, height, blurRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, blurRadius );
 
     // Blend: output = mask * original + (1 - mask) * blurred.
-    // mask=1.0 means person (keep original), mask=0.0 means background (use blurred).
+    // Use integer math (0-255) instead of float for speed.
     for( uint32_t y = 0; y < height; y++ )
     {
         for( uint32_t x = 0; x < width; x++ )
         {
             size_t idx = ( static_cast<size_t>( y ) * width + x );
-            float alpha = m_mask[idx]; // 1.0 = person, 0.0 = background
+            // Convert float mask [0..1] to integer [0..255] for fast blending.
+            uint32_t alpha = static_cast<uint32_t>( m_mask[idx] * 255.0f + 0.5f );
+            if( alpha > 255 ) alpha = 255;
+            uint32_t invAlpha = 255 - alpha;
 
             size_t px = idx * 4;
-            bgraPixels[px + 0] = static_cast<uint8_t>( bgraPixels[px + 0] * alpha + temp[px + 0] * ( 1.0f - alpha ) );
-            bgraPixels[px + 1] = static_cast<uint8_t>( bgraPixels[px + 1] * alpha + temp[px + 1] * ( 1.0f - alpha ) );
-            bgraPixels[px + 2] = static_cast<uint8_t>( bgraPixels[px + 2] * alpha + temp[px + 2] * ( 1.0f - alpha ) );
-            // Alpha channel unchanged.
+            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + m_tempFrame[px + 0] * invAlpha ) / 255 );
+            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + m_tempFrame[px + 1] * invAlpha ) / 255 );
+            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + m_tempFrame[px + 2] * invAlpha ) / 255 );
         }
     }
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::SetBackgroundImage
+//
+// Loads an image file via WIC and stores it as a BGRA pixel buffer.
+//----------------------------------------------------------------------------
+bool BackgroundBlur::SetBackgroundImage( const wchar_t* imagePath )
+{
+    m_bgImage.clear();
+    m_bgImageWidth = 0;
+    m_bgImageHeight = 0;
+    m_scaledBgImage.clear();
+    m_scaledBgW = 0;
+    m_scaledBgH = 0;
+
+    if( !imagePath || !*imagePath )
+        return false;
+
+    auto factory = wil::CoCreateInstance<IWICImagingFactory>( CLSID_WICImagingFactory );
+    if( !factory )
+        return false;
+
+    wil::com_ptr<IWICBitmapDecoder> decoder;
+    HRESULT hr = factory->CreateDecoderFromFilename(
+        imagePath, nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder );
+    if( FAILED( hr ) )
+    {
+        OutputDebug( L"[BackgroundBlur] Failed to decode image: %s (hr=0x%08X)\n", imagePath, hr );
+        return false;
+    }
+
+    wil::com_ptr<IWICBitmapFrameDecode> frame;
+    hr = decoder->GetFrame( 0, &frame );
+    if( FAILED( hr ) )
+        return false;
+
+    // Convert to BGRA 32bpp.
+    wil::com_ptr<IWICFormatConverter> converter;
+    hr = factory->CreateFormatConverter( &converter );
+    if( FAILED( hr ) )
+        return false;
+
+    hr = converter->Initialize(
+        frame.get(), GUID_WICPixelFormat32bppBGRA,
+        WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom );
+    if( FAILED( hr ) )
+        return false;
+
+    UINT w = 0, h = 0;
+    converter->GetSize( &w, &h );
+    if( w == 0 || h == 0 )
+        return false;
+
+    m_bgImage.resize( static_cast<size_t>( w ) * h * 4 );
+    hr = converter->CopyPixels( nullptr, w * 4, static_cast<UINT>( m_bgImage.size() ), m_bgImage.data() );
+    if( FAILED( hr ) )
+    {
+        m_bgImage.clear();
+        return false;
+    }
+
+    m_bgImageWidth = w;
+    m_bgImageHeight = h;
+
+    OutputDebug( L"[BackgroundBlur] Background image loaded: %ux%u from %s\n", w, h, imagePath );
+    return true;
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::EnsureScaledBgImage
+//
+// Scales the loaded background image to the specified dimensions using
+// nearest-neighbor.  The result is cached and only recomputed when the
+// target dimensions change.  The image is center-cropped to preserve
+// aspect ratio (like "cover" scaling).
+//----------------------------------------------------------------------------
+void BackgroundBlur::EnsureScaledBgImage( uint32_t width, uint32_t height )
+{
+    if( m_scaledBgW == width && m_scaledBgH == height && !m_scaledBgImage.empty() )
+        return;
+
+    m_scaledBgImage.resize( static_cast<size_t>( width ) * height * 4 );
+    m_scaledBgW = width;
+    m_scaledBgH = height;
+
+    // Compute center-crop of the source image to match the target aspect ratio.
+    double targetAspect = static_cast<double>( width ) / height;
+    double srcAspect = static_cast<double>( m_bgImageWidth ) / m_bgImageHeight;
+
+    uint32_t cropW, cropH, cropX, cropY;
+    if( srcAspect > targetAspect )
+    {
+        // Source is wider — crop horizontally.
+        cropH = m_bgImageHeight;
+        cropW = static_cast<uint32_t>( m_bgImageHeight * targetAspect + 0.5 );
+        cropX = ( m_bgImageWidth - cropW ) / 2;
+        cropY = 0;
+    }
+    else
+    {
+        // Source is taller — crop vertically.
+        cropW = m_bgImageWidth;
+        cropH = static_cast<uint32_t>( m_bgImageWidth / targetAspect + 0.5 );
+        cropX = 0;
+        cropY = ( m_bgImageHeight - cropH ) / 2;
+    }
+
+    for( uint32_t y = 0; y < height; y++ )
+    {
+        uint32_t srcY = cropY + y * cropH / height;
+        for( uint32_t x = 0; x < width; x++ )
+        {
+            uint32_t srcX = cropX + x * cropW / width;
+            size_t srcIdx = ( static_cast<size_t>( srcY ) * m_bgImageWidth + srcX ) * 4;
+            size_t dstIdx = ( static_cast<size_t>( y ) * width + x ) * 4;
+            m_scaledBgImage[dstIdx + 0] = m_bgImage[srcIdx + 0];
+            m_scaledBgImage[dstIdx + 1] = m_bgImage[srcIdx + 1];
+            m_scaledBgImage[dstIdx + 2] = m_bgImage[srcIdx + 2];
+            m_scaledBgImage[dstIdx + 3] = 0xFF;
+        }
+    }
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::ApplyImageWithMask
+//
+// Replaces background pixels with the loaded background image using the
+// segmentation mask.  Person pixels are preserved, background pixels come
+// from the scaled image.
+//----------------------------------------------------------------------------
+void BackgroundBlur::ApplyImageWithMask( uint8_t* bgraPixels, uint32_t width, uint32_t height )
+{
+    EnsureScaledBgImage( width, height );
+
+    const uint8_t* bgData = m_scaledBgImage.data();
+
+    for( uint32_t y = 0; y < height; y++ )
+    {
+        for( uint32_t x = 0; x < width; x++ )
+        {
+            size_t idx = static_cast<size_t>( y ) * width + x;
+            uint32_t alpha = static_cast<uint32_t>( m_mask[idx] * 255.0f + 0.5f );
+            if( alpha > 255 ) alpha = 255;
+            uint32_t invAlpha = 255 - alpha;
+
+            size_t px = idx * 4;
+            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + bgData[px + 0] * invAlpha ) / 255 );
+            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + bgData[px + 1] * invAlpha ) / 255 );
+            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + bgData[px + 2] * invAlpha ) / 255 );
+        }
+    }
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::ApplyImageReplacement
+//
+// Main entry point for background image replacement mode.
+//----------------------------------------------------------------------------
+bool BackgroundBlur::ApplyImageReplacement( uint8_t* bgraPixels, uint32_t width, uint32_t height )
+{
+    if( !m_session || !bgraPixels || width == 0 || height == 0 )
+        return false;
+
+    if( m_bgImage.empty() )
+        return false;
+
+    bool needInference = !m_hasCachedMask
+        || m_lastMaskWidth != width
+        || m_lastMaskHeight != height
+        || ( m_frameCounter % m_inferenceInterval ) == 0;
+
+    if( needInference )
+    {
+        if( !RunSegmentation( bgraPixels, width, height ) )
+            return false;
+        m_lastMaskWidth = width;
+        m_lastMaskHeight = height;
+        m_hasCachedMask = true;
+    }
+    m_frameCounter++;
+
+    ApplyImageWithMask( bgraPixels, width, height );
+    return true;
 }
 
 //----------------------------------------------------------------------------
@@ -460,8 +643,23 @@ bool BackgroundBlur::Apply( uint8_t* bgraPixels, uint32_t width, uint32_t height
     if( !m_session || !bgraPixels || width == 0 || height == 0 )
         return false;
 
-    if( !RunSegmentation( bgraPixels, width, height ) )
-        return false;
+    // Only run the expensive ONNX inference every N frames.
+    // Reuse the cached mask for intermediate frames — the person
+    // doesn't move much between frames at 30fps.
+    bool needInference = !m_hasCachedMask
+        || m_lastMaskWidth != width
+        || m_lastMaskHeight != height
+        || ( m_frameCounter % m_inferenceInterval ) == 0;
+
+    if( needInference )
+    {
+        if( !RunSegmentation( bgraPixels, width, height ) )
+            return false;
+        m_lastMaskWidth = width;
+        m_lastMaskHeight = height;
+        m_hasCachedMask = true;
+    }
+    m_frameCounter++;
 
     ApplyBlurWithMask( bgraPixels, width, height, blurRadius );
     return true;

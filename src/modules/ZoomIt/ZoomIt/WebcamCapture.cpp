@@ -34,7 +34,8 @@ WebcamCapture::WebcamCapture(
     Size size,
     Shape shape,
     bool fullScreenRecording,
-    bool enableBackgroundBlur )
+    WebcamBackgroundMode backgroundMode,
+    const wchar_t* backgroundImagePath )
     : m_d3dDevice( device )
     , m_d3dContext( context )
     , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
@@ -44,7 +45,8 @@ WebcamCapture::WebcamCapture(
     , m_size( size )
     , m_shape( shape )
     , m_fullScreenRecording( fullScreenRecording )
-    , m_enableBackgroundBlur( enableBackgroundBlur )
+    , m_backgroundMode( backgroundMode )
+    , m_backgroundImagePath( backgroundImagePath ? backgroundImagePath : L"" )
 {
 }
 
@@ -287,8 +289,8 @@ void WebcamCapture::CaptureThread()
 
     OutputDebug( L"[WebcamCapture] Capture thread started, reading frames...\n" );
 
-    // Initialize background blur if enabled.
-    if( m_enableBackgroundBlur )
+    // Initialize background processing if enabled.
+    if( m_backgroundMode != WebcamBackgroundMode::None )
     {
         m_backgroundBlur = std::make_unique<BackgroundBlur>();
 
@@ -301,6 +303,20 @@ void WebcamCapture::CaptureThread()
         if( m_backgroundBlur->Initialize( modelPath.c_str() ) )
         {
             OutputDebug( L"[WebcamCapture] Background blur initialized\n" );
+
+            // If image mode, load the background image.
+            if( m_backgroundMode == WebcamBackgroundMode::Image && !m_backgroundImagePath.empty() )
+            {
+                if( m_backgroundBlur->SetBackgroundImage( m_backgroundImagePath.c_str() ) )
+                {
+                    OutputDebug( L"[WebcamCapture] Background image loaded: %s\n", m_backgroundImagePath.c_str() );
+                }
+                else
+                {
+                    OutputDebug( L"[WebcamCapture] Background image failed to load, falling back to blur\n" );
+                    m_backgroundMode = WebcamBackgroundMode::Blur;
+                }
+            }
         }
         else
         {
@@ -460,12 +476,6 @@ void WebcamCapture::CaptureThread()
         // the buffer-mismatch safety net above).
         const UINT actualRowBytes = m_camWidth * 4;
 
-        // Apply background blur to the raw camera frame before scaling.
-        if( m_backgroundBlur && m_backgroundBlur->IsInitialized() )
-        {
-            m_backgroundBlur->Apply( m_framePixels.data(), m_camWidth, m_camHeight );
-        }
-
         // Compute overlay dimensions if not yet done.
         if( m_overlayW == 0 )
             ComputeOverlayDimensions();
@@ -532,7 +542,37 @@ void WebcamCapture::CaptureThread()
                 {
                     const UINT srcX = srcCropX + x * srcCropW / ovW;
                     UINT32 pixel = srcRow[srcX];
+                    dstRow[x] = pixel | 0xFF000000u;
+                }
+            }
 
+            // Apply background processing on the scaled overlay-sized frame.
+            // This is much faster than processing the full camera frame
+            // (e.g. 300x300 vs 1920x1080 = ~23x fewer pixels).
+            if( m_backgroundBlur && m_backgroundBlur->IsInitialized() )
+            {
+                if( m_backgroundMode == WebcamBackgroundMode::Image && m_backgroundBlur->HasBackgroundImage() )
+                {
+                    m_backgroundBlur->ApplyImageReplacement(
+                        reinterpret_cast<uint8_t*>( m_scaledPixels.data() ),
+                        ovW, ovH );
+                }
+                else
+                {
+                    m_backgroundBlur->Apply(
+                        reinterpret_cast<uint8_t*>( m_scaledPixels.data() ),
+                        ovW, ovH, 7 );
+                }
+            }
+
+            // Apply shape mask (set pixels outside the shape to transparent).
+            // Skip entirely for Square — all pixels are inside.
+            if( m_shape != Square )
+            for( UINT y = 0; y < ovH; y++ )
+            {
+                UINT32* dstRow2 = dstPixels + static_cast<size_t>( y ) * ovW;
+                for( UINT x = 0; x < ovW; x++ )
+                {
                     bool inside = true;
                     if( m_shape == Circle )
                     {
@@ -576,7 +616,8 @@ void WebcamCapture::CaptureThread()
                     }
                     // Square: inside is always true (no masking).
 
-                    dstRow[x] = inside ? ( pixel | 0xFF000000u ) : 0x00000000u;
+                    if( !inside )
+                        dstRow2[x] = 0x00000000u;
                 }
             }
 

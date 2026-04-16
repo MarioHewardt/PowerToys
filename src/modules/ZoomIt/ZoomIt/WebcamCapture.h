@@ -19,6 +19,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <memory>
+#include "BackgroundBlur.h"
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -48,7 +49,8 @@ public:
         Size size,
         Shape shape,
         bool fullScreenRecording = false,
-        bool enableBackgroundBlur = false );
+        WebcamBackgroundMode backgroundMode = WebcamBackgroundMode::None,
+        const wchar_t* backgroundImagePath = nullptr );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -167,8 +169,9 @@ private:
     std::condition_variable             m_readyCV;
     bool                                m_firstFrameCaptured = false;
 
-    // Background blur.
-    bool                                m_enableBackgroundBlur = false;
+    // Background processing.
+    WebcamBackgroundMode                m_backgroundMode = WebcamBackgroundMode::None;
+    std::wstring                        m_backgroundImagePath;
     std::unique_ptr<BackgroundBlur>     m_backgroundBlur;
 
     // Debug counters for CompositeOnto logging.

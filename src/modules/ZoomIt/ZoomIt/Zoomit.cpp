@@ -2986,7 +2986,13 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
-                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_LABEL), webcamEnabled);
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_MODE), webcamEnabled);
+                {
+                    bool isImageMode = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_BG_MODE), CB_GETCURSEL, 0, 0) == 2;
+                    EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_IMAGE), isImageMode);
+                    EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_BROWSE), isImageMode);
+                }
                 {
                     bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
                     EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -3003,7 +3009,13 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
-            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_LABEL), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_MODE), webcamEnabled);
+            {
+                bool isImageMode = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_BG_MODE), CB_GETCURSEL, 0, 0) == 2;
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_IMAGE), isImageMode);
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_BROWSE), isImageMode);
+            }
             {
                 bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -3018,8 +3030,76 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE), webcamEnabled && !isFullScreen);
         }
+        // Handle webcam background mode combo change — show/hide browse controls
+        if (HIWORD(wParam) == CBN_SELCHANGE && LOWORD(wParam) == IDC_WEBCAM_BG_MODE) {
+            bool isGif = (g_RecordingFormat == RecordingFormat::GIF);
+            bool webcamEnabled = !isGif && IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
+            bool isImageMode = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_BG_MODE), CB_GETCURSEL, 0, 0) == 2;
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_IMAGE), isImageMode);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BG_BROWSE), isImageMode);
+        }
 
         switch ( LOWORD( wParam )) {
+        case IDC_WEBCAM_BG_BROWSE:
+        {
+            auto openDialog = wil::CoCreateInstance<IFileOpenDialog>( CLSID_FileOpenDialog );
+
+            FILEOPENDIALOGOPTIONS options;
+            if( SUCCEEDED( openDialog->GetOptions( &options ) ) )
+                openDialog->SetOptions( options | FOS_FORCEFILESYSTEM );
+
+            COMDLG_FILTERSPEC fileTypes[] = {
+                { L"Bitmap Files (*.bmp;*.dib)", L"*.bmp;*.dib" },
+                { L"PNG (*.png)", L"*.png" },
+                { L"JPEG (*.jpg;*.jpeg;*.jpe;*.jfif)", L"*.jpg;*.jpeg;*.jpe;*.jfif" },
+                { L"GIF (*.gif)", L"*.gif" },
+                { L"All Picture Files", L"*.bmp;*.dib;*.png;*.jpg;*.jpeg;*.jpe;*.jfif;*.gif" },
+                { L"All Files", L"*.*" }
+            };
+            openDialog->SetFileTypes( _countof( fileTypes ), fileTypes );
+            openDialog->SetFileTypeIndex( 5 ); // Default to "All Picture Files"
+            openDialog->SetTitle( L"ZoomIt: Specify Background Image..." );
+
+            // Set initial folder from current path or Pictures folder.
+            TCHAR bgFilePath[MAX_PATH], bgInitDir[MAX_PATH];
+            GetDlgItemText( hDlg, IDC_WEBCAM_BG_IMAGE, bgFilePath, _countof( bgFilePath ) );
+            if( _tcsrchr( bgFilePath, '\\' ) )
+            {
+                _tcscpy( bgInitDir, bgFilePath );
+                *( _tcsrchr( bgInitDir, '\\' ) + 1 ) = 0;
+            }
+            else
+            {
+                _tcscpy( bgFilePath, L"%USERPROFILE%\\Pictures" );
+                ExpandEnvironmentStrings( bgFilePath, bgInitDir, _countof( bgInitDir ) );
+            }
+            wil::com_ptr<IShellItem> folderItem;
+            if( SUCCEEDED( SHCreateItemFromParsingName( bgInitDir, nullptr, IID_PPV_ARGS( &folderItem ) ) ) )
+            {
+                openDialog->SetFolder( folderItem.get() );
+            }
+
+            OpenSaveDialogEvents* pEvents = new OpenSaveDialogEvents(false);
+            DWORD dwCookie = 0;
+            openDialog->Advise( pEvents, &dwCookie );
+
+            if( SUCCEEDED( openDialog->Show( hDlg ) ) )
+            {
+                wil::com_ptr<IShellItem> resultItem;
+                if( SUCCEEDED( openDialog->GetResult( &resultItem ) ) )
+                {
+                    wil::unique_cotaskmem_string pathStr;
+                    if( SUCCEEDED( resultItem->GetDisplayName( SIGDN_FILESYSPATH, &pathStr ) ) )
+                    {
+                        SetDlgItemText( hDlg, IDC_WEBCAM_BG_IMAGE, pathStr.get() );
+                    }
+                }
+            }
+
+            openDialog->Unadvise( dwCookie );
+            pEvents->Release();
+            break;
+        }
         case IDC_ADVANCED_BREAK:
             DialogBox( g_hInstance, L"ADVANCED_BREAK", hDlg, AdvancedBreakProc );
             break;
@@ -4923,8 +5003,20 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         // Webcam overlay controls
         CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_OVERLAY,
             g_WebcamOverlay ? BST_CHECKED : BST_UNCHECKED );
-        CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR,
-            g_WebcamBackgroundBlur ? BST_CHECKED : BST_UNCHECKED );
+
+        // Webcam background mode combo
+        {
+            HWND hBgMode = GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_MODE );
+            SendMessage( hBgMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>( L"None" ) );
+            SendMessage( hBgMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>( L"Blur" ) );
+            SendMessage( hBgMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>( L"Image" ) );
+            SendMessage( hBgMode, CB_SETCURSEL, g_WebcamBackgroundMode, 0 );
+
+            SetDlgItemText( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_IMAGE, g_WebcamBackgroundImage );
+            bool isImageMode = ( g_WebcamBackgroundMode == 2 );
+            EnableWindow( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_IMAGE ), isImageMode );
+            EnableWindow( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_BROWSE ), isImageMode );
+        }
 
         // Enumerate webcam devices
         webcams.clear();
@@ -5009,7 +5101,13 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), webcamEnabled);
-            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
+            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_LABEL), webcamEnabled);
+            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_MODE), webcamEnabled);
+            {
+                bool isImageMode = webcamEnabled && g_WebcamBackgroundMode == 2;
+                EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_IMAGE), isImageMode);
+                EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_BROWSE), isImageMode);
+            }
             {
                 bool isFullScreen = webcamEnabled && g_WebcamSize == 4;
                 EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -5385,7 +5483,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             g_WebcamPosition = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), CB_GETCURSEL, 0, 0));
             g_WebcamSize = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0));
             g_WebcamShape = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE), CB_GETCURSEL, 0, 0));
-            g_WebcamBackgroundBlur = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR) == BST_CHECKED;
+            g_WebcamBackgroundMode = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_MODE), CB_GETCURSEL, 0, 0));
+            GetDlgItemText(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BG_IMAGE, g_WebcamBackgroundImage, MAX_PATH);
             {
                 int wcIndex = static_cast<int>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_DEVICE), CB_GETCURSEL, 0, 0));
                 _tcscpy( g_WebcamDeviceSymLink, wcIndex == 0 ? L"" : webcams[static_cast<size_t>(wcIndex) - 1].first.c_str() );
