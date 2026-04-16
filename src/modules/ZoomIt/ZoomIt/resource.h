@@ -124,6 +124,7 @@
 #define IDC_WEBCAM_SIZE_LABEL           1121
 #define IDC_WEBCAM_SHAPE                1123
 #define IDC_WEBCAM_SHAPE_LABEL          1124
+#define IDC_WEBCAM_BACKGROUND_BLUR      1126
 #define IDC_TRIM_APPEND                 1122
 #define IDC_RECORD_ASPECT_RATIO         1125
 #define IDC_SAVE                        40002

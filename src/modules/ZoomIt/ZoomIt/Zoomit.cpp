@@ -2986,6 +2986,7 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
+                EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
                 {
                     bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
                     EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -3002,6 +3003,7 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), webcamEnabled);
+            EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
             {
                 bool isFullScreen = webcamEnabled && SendMessage(GetDlgItem(hDlg, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0) == 4;
                 EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -4921,6 +4923,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         // Webcam overlay controls
         CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_OVERLAY,
             g_WebcamOverlay ? BST_CHECKED : BST_UNCHECKED );
+        CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR,
+            g_WebcamBackgroundBlur ? BST_CHECKED : BST_UNCHECKED );
 
         // Enumerate webcam devices
         webcams.clear();
@@ -5005,6 +5009,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE_LABEL), webcamEnabled);
             EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), webcamEnabled);
+            EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR), webcamEnabled);
             {
                 bool isFullScreen = webcamEnabled && g_WebcamSize == 4;
                 EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE_LABEL), webcamEnabled && !isFullScreen);
@@ -5380,6 +5385,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             g_WebcamPosition = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_POSITION), CB_GETCURSEL, 0, 0));
             g_WebcamSize = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SIZE), CB_GETCURSEL, 0, 0));
             g_WebcamShape = static_cast<DWORD>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_SHAPE), CB_GETCURSEL, 0, 0));
+            g_WebcamBackgroundBlur = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_BACKGROUND_BLUR) == BST_CHECKED;
             {
                 int wcIndex = static_cast<int>(SendMessage(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_WEBCAM_DEVICE), CB_GETCURSEL, 0, 0));
                 _tcscpy( g_WebcamDeviceSymLink, wcIndex == 0 ? L"" : webcams[static_cast<size_t>(wcIndex) - 1].first.c_str() );

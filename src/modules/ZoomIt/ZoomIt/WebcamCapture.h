@@ -18,10 +18,13 @@
 #include <mfreadwrite.h>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
 #include <winrt/base.h>
+
+class BackgroundBlur;
 
 class WebcamCapture
 {
@@ -44,7 +47,8 @@ public:
         Position position,
         Size size,
         Shape shape,
-        bool fullScreenRecording = false );
+        bool fullScreenRecording = false,
+        bool enableBackgroundBlur = false );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -162,6 +166,10 @@ private:
     std::mutex                          m_readyMutex;
     std::condition_variable             m_readyCV;
     bool                                m_firstFrameCaptured = false;
+
+    // Background blur.
+    bool                                m_enableBackgroundBlur = false;
+    std::unique_ptr<BackgroundBlur>     m_backgroundBlur;
 
     // Debug counters for CompositeOnto logging.
     int                                 m_compositeCount = 0;

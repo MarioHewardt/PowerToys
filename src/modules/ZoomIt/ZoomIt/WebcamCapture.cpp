@@ -11,6 +11,7 @@
 //==============================================================================
 #include "pch.h"
 #include "WebcamCapture.h"
+#include "BackgroundBlur.h"
 
 // Defined in Zoomit.cpp; compiles to nothing in Release builds.
 void OutputDebug(const TCHAR* format, ...);
@@ -32,7 +33,8 @@ WebcamCapture::WebcamCapture(
     Position position,
     Size size,
     Shape shape,
-    bool fullScreenRecording )
+    bool fullScreenRecording,
+    bool enableBackgroundBlur )
     : m_d3dDevice( device )
     , m_d3dContext( context )
     , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
@@ -42,6 +44,7 @@ WebcamCapture::WebcamCapture(
     , m_size( size )
     , m_shape( shape )
     , m_fullScreenRecording( fullScreenRecording )
+    , m_enableBackgroundBlur( enableBackgroundBlur )
 {
 }
 
@@ -283,6 +286,29 @@ void WebcamCapture::CaptureThread()
     }
 
     OutputDebug( L"[WebcamCapture] Capture thread started, reading frames...\n" );
+
+    // Initialize background blur if enabled.
+    if( m_enableBackgroundBlur )
+    {
+        m_backgroundBlur = std::make_unique<BackgroundBlur>();
+
+        // Look for the segmentation model next to the executable.
+        WCHAR exePath[MAX_PATH] = {};
+        GetModuleFileNameW( nullptr, exePath, MAX_PATH );
+        PathRemoveFileSpecW( exePath );
+        std::wstring modelPath = std::wstring( exePath ) + L"\\selfie_segmentation.onnx";
+
+        if( m_backgroundBlur->Initialize( modelPath.c_str() ) )
+        {
+            OutputDebug( L"[WebcamCapture] Background blur initialized\n" );
+        }
+        else
+        {
+            OutputDebug( L"[WebcamCapture] Background blur model failed to load: %s\n", modelPath.c_str() );
+            m_backgroundBlur.reset();
+        }
+    }
+
     int frameCount = 0;
 #if _DEBUG
     LARGE_INTEGER perfFreq = {}, lastFrameTime = {}, loopStart = {};
@@ -433,6 +459,12 @@ void WebcamCapture::CaptureThread()
         // Use the current m_camWidth (which may have been corrected by
         // the buffer-mismatch safety net above).
         const UINT actualRowBytes = m_camWidth * 4;
+
+        // Apply background blur to the raw camera frame before scaling.
+        if( m_backgroundBlur && m_backgroundBlur->IsInitialized() )
+        {
+            m_backgroundBlur->Apply( m_framePixels.data(), m_camWidth, m_camHeight );
+        }
 
         // Compute overlay dimensions if not yet done.
         if( m_overlayW == 0 )
