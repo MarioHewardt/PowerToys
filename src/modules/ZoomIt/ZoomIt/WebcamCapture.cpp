@@ -294,11 +294,29 @@ void WebcamCapture::CaptureThread()
     {
         m_backgroundBlur = std::make_unique<BackgroundBlur>();
 
-        // Look for the segmentation model next to the executable.
-        WCHAR exePath[MAX_PATH] = {};
-        GetModuleFileNameW( nullptr, exePath, MAX_PATH );
-        PathRemoveFileSpecW( exePath );
-        std::wstring modelPath = std::wstring( exePath ) + L"\\selfie_segmentation.onnx";
+        // Extract the segmentation model from embedded resources to %TEMP%.
+        WCHAR tempDir[MAX_PATH] = {};
+        GetTempPath( MAX_PATH, tempDir );
+        std::wstring modelPath = std::wstring( tempDir ) + L"selfie_segmentation.onnx";
+
+        HRSRC hRes = FindResource( NULL, L"RCSEGMODEL", L"BINRES" );
+        if( hRes )
+        {
+            HGLOBAL hData = LoadResource( NULL, hRes );
+            DWORD   size  = SizeofResource( NULL, hRes );
+            LPVOID  pData = hData ? LockResource( hData ) : nullptr;
+            if( pData && size > 0 )
+            {
+                HANDLE hFile = CreateFile( modelPath.c_str(), GENERIC_WRITE, 0, NULL,
+                                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+                if( hFile != INVALID_HANDLE_VALUE )
+                {
+                    DWORD written;
+                    WriteFile( hFile, pData, size, &written, NULL );
+                    CloseHandle( hFile );
+                }
+            }
+        }
 
         if( m_backgroundBlur->Initialize( modelPath.c_str() ) )
         {

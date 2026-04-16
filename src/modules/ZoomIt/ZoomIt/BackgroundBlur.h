@@ -87,7 +87,10 @@ private:
 
     // Reusable buffers to avoid per-frame allocations.
     std::vector<float>      m_inputTensor;      // RGB float [1,3,H,W] or [1,H,W,3]
+    std::vector<float>      m_outputBuf;        // Raw copy of output tensor data
     std::vector<float>      m_mask;             // Segmentation mask [width*height]
+    std::vector<float>      m_erodeBuf;         // Temp buffer for mask erosion
+    std::vector<float>      m_erodeTmp;         // Second erosion temp buffer
     std::vector<uint8_t>    m_blurredFrame;     // Temporary blurred copy
     std::vector<uint8_t>    m_tempFrame;        // Second temp buffer for blur passes
 

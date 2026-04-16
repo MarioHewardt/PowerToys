@@ -164,10 +164,15 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
 
         auto result = m_session.Evaluate( m_binding, L"" );
 
-        // Extract output tensor.
+        // Extract output tensor — bulk-copy to a raw float array so we
+        // avoid per-element WinRT/COM dispatch in the hot loop.
         auto outputTensor = result.Outputs().Lookup( m_outputName ).as<winml::TensorFloat>();
         auto outputShape = outputTensor.Shape();
         auto outputView = outputTensor.GetAsVectorView();
+        const uint32_t outputSize = outputView.Size();
+        m_outputBuf.resize( outputSize );
+        outputView.GetMany( 0, m_outputBuf );
+        const float* outData = m_outputBuf.data();
 
         // Determine output mask dimensions.
         int64_t outH = mH, outW = mW;
@@ -195,24 +200,27 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
             outW = outputShape.GetAt( 2 );
         }
 
-        // Resize output mask to frame dimensions.
-        m_mask.resize( static_cast<size_t>( width ) * height );
-        for( uint32_t y = 0; y < height; y++ )
-        {
-            int64_t srcY = static_cast<int64_t>( y ) * outH / height;
-            for( uint32_t x = 0; x < width; x++ )
-            {
-                int64_t srcX = static_cast<int64_t>( x ) * outW / width;
-                float personScore;
+        // Build model-resolution mask first, apply all post-processing
+        // at model resolution (e.g. 256×256 = 65K pixels), then upscale
+        // to frame resolution.  This is ~5× faster than processing at
+        // full frame size.
+        const size_t modelPixels = static_cast<size_t>( outH ) * outW;
+        m_erodeBuf.resize( modelPixels );
 
+        // Extract person scores at model resolution from the raw array.
+        for( int64_t y = 0; y < outH; y++ )
+        {
+            for( int64_t x = 0; x < outW; x++ )
+            {
+                float personScore;
                 if( numClasses == 1 )
                 {
-                    personScore = outputView.GetAt( static_cast<uint32_t>( srcY * outW + srcX ) );
+                    personScore = outData[y * outW + x];
                 }
                 else
                 {
-                    float bg = outputView.GetAt( static_cast<uint32_t>( 0 * outH * outW + srcY * outW + srcX ) );
-                    float fg = outputView.GetAt( static_cast<uint32_t>( 1 * outH * outW + srcY * outW + srcX ) );
+                    float bg = outData[0 * outH * outW + y * outW + x];
+                    float fg = outData[1 * outH * outW + y * outW + x];
                     float maxVal = (std::max)( bg, fg );
                     float expBg = expf( bg - maxVal );
                     float expFg = expf( fg - maxVal );
@@ -220,7 +228,60 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
                 }
 
                 personScore = (std::max)( 0.0f, (std::min)( 1.0f, personScore ) );
-                m_mask[static_cast<size_t>( y ) * width + x] = personScore;
+
+                // Sigmoid sharpening: center at 0.55 so borderline pixels
+                // (e.g. light sofa near a person) are pushed to background.
+                constexpr float kSigmoidStrength = 12.0f;
+                constexpr float kSigmoidCenter  = 0.55f;
+                personScore = 1.0f / ( 1.0f + expf( -kSigmoidStrength * ( personScore - kSigmoidCenter ) ) );
+
+                m_erodeBuf[static_cast<size_t>( y * outW + x )] = personScore;
+            }
+        }
+
+        // Erode at model resolution: shrink person boundary inward so
+        // nearby background objects aren't absorbed.  Radius 1 at 256×256
+        // is proportionally equivalent to ~2-3 px at frame resolution.
+        constexpr int kErodeRadius = 1;
+        m_erodeTmp.resize( modelPixels );
+
+        // Horizontal min pass.
+        for( int64_t y = 0; y < outH; y++ )
+        {
+            for( int64_t x = 0; x < outW; x++ )
+            {
+                float minVal = 1.0f;
+                int64_t x0 = (std::max)( static_cast<int64_t>( 0 ), x - kErodeRadius );
+                int64_t x1 = (std::min)( outW - 1, x + kErodeRadius );
+                for( int64_t xx = x0; xx <= x1; xx++ )
+                    minVal = (std::min)( minVal, m_erodeBuf[y * outW + xx] );
+                m_erodeTmp[y * outW + x] = minVal;
+            }
+        }
+
+        // Vertical min pass.
+        for( int64_t y = 0; y < outH; y++ )
+        {
+            for( int64_t x = 0; x < outW; x++ )
+            {
+                float minVal = 1.0f;
+                int64_t y0 = (std::max)( static_cast<int64_t>( 0 ), y - kErodeRadius );
+                int64_t y1 = (std::min)( outH - 1, y + kErodeRadius );
+                for( int64_t yy = y0; yy <= y1; yy++ )
+                    minVal = (std::min)( minVal, m_erodeTmp[yy * outW + x] );
+                m_erodeBuf[y * outW + x] = minVal;
+            }
+        }
+
+        // Upscale processed mask to frame dimensions via nearest-neighbor.
+        m_mask.resize( static_cast<size_t>( width ) * height );
+        for( uint32_t y = 0; y < height; y++ )
+        {
+            int64_t srcY = static_cast<int64_t>( y ) * outH / height;
+            for( uint32_t x = 0; x < width; x++ )
+            {
+                int64_t srcX = static_cast<int64_t>( x ) * outW / width;
+                m_mask[static_cast<size_t>( y ) * width + x] = m_erodeBuf[srcY * outW + srcX];
             }
         }
 
