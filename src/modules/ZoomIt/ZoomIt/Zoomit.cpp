@@ -4402,7 +4402,7 @@ LRESULT CALLBACK GroupBoxSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARA
 LRESULT CALLBACK StaticTextSubclassProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData)
 {
     const int ctrlId = GetDlgCtrlID( hWnd );
-    const bool isOptionsHeader = (ctrlId == IDC_VERSION || ctrlId == IDC_COPYRIGHT || ctrlId == IDC_THIRDPARTY_NOTICES);
+    const bool isOptionsHeader = (ctrlId == IDC_VERSION || ctrlId == IDC_COPYRIGHT);
 
     auto paintStaticText = [](HWND hWnd, HDC hdc) -> void
     {
@@ -4918,7 +4918,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         const int deltaY = newVersionHeight - oldVersionHeight;
         if( deltaY > 0 )
         {
-            const int headerIdsToShift[] = { IDC_COPYRIGHT, IDC_THIRDPARTY_NOTICES, IDC_LINK };
+            const int headerIdsToShift[] = { IDC_COPYRIGHT, IDC_LINK };
             for( int i = 0; i < _countof( headerIdsToShift ); i++ )
             {
                 HWND hCtrl = GetDlgItem( hDlg, headerIdsToShift[i] );
@@ -5189,10 +5189,6 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         if( HWND hCopyright = GetDlgItem( hDlg, IDC_COPYRIGHT ) )
         {
             SetWindowSubclass( hCopyright, StaticTextSubclassProc, 56, 0 );
-        }
-        if( HWND hNotices = GetDlgItem( hDlg, IDC_THIRDPARTY_NOTICES ) )
-        {
-            SetWindowSubclass( hNotices, StaticTextSubclassProc, 57, 0 );
         }
 
         // Apply dark mode to the dialog and all tab pages
