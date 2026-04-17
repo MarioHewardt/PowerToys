@@ -38,9 +38,22 @@ bool BackgroundBlur::Initialize( const wchar_t* modelPath )
         // Load the model from file.
         m_model = winml::LearningModel::LoadFromFilePath( modelPath );
 
-        // Create a CPU-only session (no DirectML).
-        winml::LearningModelDevice cpuDevice( winml::LearningModelDeviceKind::Cpu );
-        m_session = winml::LearningModelSession( m_model, cpuDevice );
+        // Try GPU (DirectML) first for faster inference; fall back to CPU
+        // if no suitable GPU is available.
+        try
+        {
+            winml::LearningModelDevice gpuDevice( winml::LearningModelDeviceKind::DirectXHighPerformance );
+            m_session = winml::LearningModelSession( m_model, gpuDevice );
+            m_usingGpu = true;
+            OutputDebug( L"[BackgroundBlur] Using DirectML (GPU) for inference\n" );
+        }
+        catch( ... )
+        {
+            winml::LearningModelDevice cpuDevice( winml::LearningModelDeviceKind::Cpu );
+            m_session = winml::LearningModelSession( m_model, cpuDevice );
+            m_usingGpu = false;
+            OutputDebug( L"[BackgroundBlur] GPU unavailable, falling back to CPU\n" );
+        }
         m_binding = winml::LearningModelBinding( m_session );
 
         // Get input feature descriptor.
@@ -544,10 +557,16 @@ bool BackgroundBlur::ApplyImageReplacement( uint8_t* bgraPixels, uint32_t width,
     if( m_bgImage.empty() )
         return false;
 
+    // Run inference less often for large frames to keep framerate smooth.
+    // Small overlay (~320×240 = 77K px) → every 3 frames.
+    // Full-screen (~1920×1080 = 2M px) → every 5 frames.
+    const uint32_t pixels = width * height;
+    const int inferenceInterval = ( pixels > 500000 ) ? 5 : 3;
+
     bool needInference = !m_hasCachedMask
         || m_lastMaskWidth != width
         || m_lastMaskHeight != height
-        || ( m_frameCounter % m_inferenceInterval ) == 0;
+        || ( m_frameCounter % inferenceInterval ) == 0;
 
     if( needInference )
     {
@@ -576,10 +595,14 @@ bool BackgroundBlur::Apply( uint8_t* bgraPixels, uint32_t width, uint32_t height
     // Only run the expensive ONNX inference every N frames.
     // Reuse the cached mask for intermediate frames — the person
     // doesn't move much between frames at 30fps.
+    // Increase interval for large frames to keep framerate smooth.
+    const uint32_t pixels = width * height;
+    const int inferenceInterval = ( pixels > 500000 ) ? 5 : 3;
+
     bool needInference = !m_hasCachedMask
         || m_lastMaskWidth != width
         || m_lastMaskHeight != height
-        || ( m_frameCounter % m_inferenceInterval ) == 0;
+        || ( m_frameCounter % inferenceInterval ) == 0;
 
     if( needInference )
     {

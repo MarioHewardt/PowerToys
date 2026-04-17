@@ -84,6 +84,7 @@ private:
     int64_t                 m_modelInputHeight = 256;
     int64_t                 m_modelInputChannels = 3;
     bool                    m_inputIsNchw = true; // true = [1,C,H,W], false = [1,H,W,C]
+    bool                    m_usingGpu = false;   // true if DirectML session is active
 
     // Reusable buffers to avoid per-frame allocations.
     std::vector<float>      m_inputTensor;      // RGB float [1,3,H,W] or [1,H,W,3]
@@ -105,7 +106,6 @@ private:
 
     // Frame-skipping: reuse the segmentation mask for N frames.
     int                     m_frameCounter = 0;
-    int                     m_inferenceInterval = 3; // run inference every N frames
     uint32_t                m_lastMaskWidth = 0;
     uint32_t                m_lastMaskHeight = 0;
     bool                    m_hasCachedMask = false;
