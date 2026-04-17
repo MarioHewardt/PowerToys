@@ -356,38 +356,88 @@ static void VerticalBoxBlur(
 //----------------------------------------------------------------------------
 // BackgroundBlur::ApplyBlurWithMask
 //
-// Creates a blurred copy of the frame using 3 passes of box blur
-// (approximates Gaussian), then blends original and blurred based
-// on the segmentation mask.
+// Downscales the frame, blurs at reduced resolution, upscales the
+// blurred result, then blends original and blurred at full resolution
+// based on the segmentation mask.  This is ~16× faster than blurring
+// at full-screen resolution.
 //----------------------------------------------------------------------------
 void BackgroundBlur::ApplyBlurWithMask( uint8_t* bgraPixels, uint32_t width, uint32_t height, int blurRadius )
 {
-    const size_t frameBytes = static_cast<size_t>( width ) * height * 4;
-    m_blurredFrame.resize( frameBytes );
-    m_tempFrame.resize( frameBytes );
+    // For small frames (overlays), blur directly at full resolution.
+    // For large frames (full-screen), downscale first.
+    const uint32_t kMaxDirectPixels = 400 * 400;
+    const uint32_t totalPixels = width * height;
 
-    // 2 passes of box blur → approximate Gaussian (fast enough for small overlays).
-    HorizontalBoxBlur( bgraPixels, m_blurredFrame.data(), width, height, blurRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, blurRadius );
-    HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), width, height, blurRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, blurRadius );
+    uint32_t blurW, blurH;
+    if( totalPixels <= kMaxDirectPixels )
+    {
+        blurW = width;
+        blurH = height;
+    }
+    else
+    {
+        // Downscale so the blur area is ~kMaxDirectPixels.
+        // This gives roughly 1/4 resolution at 1080p.
+        float scale = sqrtf( static_cast<float>( kMaxDirectPixels ) / totalPixels );
+        blurW = (std::max)( 1u, static_cast<uint32_t>( width * scale ) );
+        blurH = (std::max)( 1u, static_cast<uint32_t>( height * scale ) );
+    }
+
+    const size_t blurBytes = static_cast<size_t>( blurW ) * blurH * 4;
+    m_smallFrame.resize( blurBytes );
+    m_blurredFrame.resize( blurBytes );
+    m_tempFrame.resize( blurBytes );
+
+    // Downscale (or copy) source frame to blur working size.
+    if( blurW == width && blurH == height )
+    {
+        memcpy( m_smallFrame.data(), bgraPixels, blurBytes );
+    }
+    else
+    {
+        for( uint32_t y = 0; y < blurH; y++ )
+        {
+            uint32_t srcY = y * height / blurH;
+            for( uint32_t x = 0; x < blurW; x++ )
+            {
+                uint32_t srcX = x * width / blurW;
+                size_t si = ( static_cast<size_t>( srcY ) * width + srcX ) * 4;
+                size_t di = ( static_cast<size_t>( y ) * blurW + x ) * 4;
+                m_smallFrame[di + 0] = bgraPixels[si + 0];
+                m_smallFrame[di + 1] = bgraPixels[si + 1];
+                m_smallFrame[di + 2] = bgraPixels[si + 2];
+                m_smallFrame[di + 3] = 0xFF;
+            }
+        }
+    }
+
+    // Scale blur radius proportionally.
+    int scaledRadius = (std::max)( 1, static_cast<int>( blurRadius * blurW / width ) );
+
+    // 2 passes of box blur → approximate Gaussian.
+    HorizontalBoxBlur( m_smallFrame.data(), m_blurredFrame.data(), blurW, blurH, scaledRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), blurW, blurH, scaledRadius );
+    HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), blurW, blurH, scaledRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), blurW, blurH, scaledRadius );
 
     // Blend: output = mask * original + (1 - mask) * blurred.
-    // Use integer math (0-255) instead of float for speed.
+    // Upscale blurred pixels on-the-fly during blending (nearest-neighbor).
     for( uint32_t y = 0; y < height; y++ )
     {
+        uint32_t blurY = y * blurH / height;
         for( uint32_t x = 0; x < width; x++ )
         {
-            size_t idx = ( static_cast<size_t>( y ) * width + x );
-            // Convert float mask [0..1] to integer [0..255] for fast blending.
+            size_t idx = static_cast<size_t>( y ) * width + x;
             uint32_t alpha = static_cast<uint32_t>( m_mask[idx] * 255.0f + 0.5f );
             if( alpha > 255 ) alpha = 255;
             uint32_t invAlpha = 255 - alpha;
 
+            uint32_t blurX = x * blurW / width;
+            size_t bpx = ( static_cast<size_t>( blurY ) * blurW + blurX ) * 4;
             size_t px = idx * 4;
-            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + m_tempFrame[px + 0] * invAlpha ) / 255 );
-            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + m_tempFrame[px + 1] * invAlpha ) / 255 );
-            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + m_tempFrame[px + 2] * invAlpha ) / 255 );
+            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + m_tempFrame[bpx + 0] * invAlpha ) / 255 );
+            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + m_tempFrame[bpx + 1] * invAlpha ) / 255 );
+            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + m_tempFrame[bpx + 2] * invAlpha ) / 255 );
         }
     }
 }
