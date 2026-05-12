@@ -1014,52 +1014,7 @@ VideoRecordingSession::VideoRecordingSession(
     }
     if( g_WebcamOverlay )
     {
-        RecDiag( L"Constructor: probing webcam for exclusive access\n" );
-
-        // Check if the camera is already in use by another application.
-        // Frame Server allows shared access, so the MF source reader would
-        // succeed even when Teams etc. hold the camera.  We probe with
-        // ExclusiveControl to detect this before starting the capture thread.
-        // The probe must run on a background (MTA) thread because the
-        // constructor runs on the STA UI thread where .get() would deadlock.
-        std::wstring probeDeviceId( g_WebcamDeviceSymLink );
-        auto probeResult = std::async( std::launch::async, [&probeDeviceId]() -> bool
-        {
-            try
-            {
-                winrt::Windows::Media::Capture::MediaCapture probeCapture;
-                winrt::Windows::Media::Capture::MediaCaptureInitializationSettings probeSettings;
-                probeSettings.SharingMode( winrt::Windows::Media::Capture::MediaCaptureSharingMode::ExclusiveControl );
-                probeSettings.StreamingCaptureMode( winrt::Windows::Media::Capture::StreamingCaptureMode::Video );
-                if( !probeDeviceId.empty() )
-                {
-                    probeSettings.VideoDeviceId( winrt::hstring( probeDeviceId ) );
-                }
-                probeCapture.InitializeAsync( probeSettings ).get();
-                probeCapture.Close();
-                return true;
-            }
-            catch( ... )
-            {
-                return false;
-            }
-        });
-
-        if( !probeResult.get() )
-        {
-            RecDiag( L"Constructor: webcam is in use by another application\n" );
-            throw winrt::hresult_error( E_ACCESSDENIED,
-                L"The webcam could not be opened. It may be in use by another application." );
-        }
-
         RecDiag( L"Constructor: creating WebcamCapture\n" );
-        // Force rectangle shape in fullscreen mode
-        auto webcamShape = (g_WebcamSize == WebcamCapture::FullScreen)
-            ? WebcamCapture::Square
-            : static_cast<WebcamCapture::Shape>( g_WebcamShape );
-        // Fullscreen recording (Ctrl+5) uses an empty cropRect;
-        // region recording (Ctrl+Shift+5) has a non-zero cropRect.
-        bool isFullScreenRecording = (cropRect.right - cropRect.left) == 0;
         m_webcamCapture = std::make_unique<WebcamCapture>(
             m_d3dDevice, m_d3dContext,
             g_WebcamDeviceSymLink,
@@ -1067,8 +1022,7 @@ VideoRecordingSession::VideoRecordingSession(
             static_cast<UINT>( outputHeight ),
             static_cast<WebcamCapture::Position>( g_WebcamPosition ),
             static_cast<WebcamCapture::Size>( g_WebcamSize ),
-            webcamShape,
-            isFullScreenRecording );
+            static_cast<WebcamCapture::Shape>( g_WebcamShape ) );
         m_webcamCapture->Start();
         RecDiag( L"Constructor: WebcamCapture::Start() returned\n" );
     }
@@ -1125,15 +1079,6 @@ VideoRecordingSession::VideoRecordingSession(
         bool webcamReady = m_webcamCapture->WaitForFirstFrame( 2000 );
         RecDiag( L"Constructor: WaitForFirstFrame returned %s\n",
                  webcamReady ? L"TRUE (ready)" : L"FALSE (timeout)" );
-
-        if( !webcamReady && m_webcamCapture->HasInitFailed() )
-        {
-            RecDiag( L"Constructor: webcam init failed (camera may be in use)\n" );
-            m_webcamCapture->Stop();
-            m_webcamCapture.reset();
-            throw winrt::hresult_error( E_ACCESSDENIED,
-                L"The webcam could not be opened. It may be in use by another application." );
-        }
     }
     RecDiag( L"Constructor: exit\n" );
 }
@@ -3967,71 +3912,30 @@ static void DrawPlaybackButton(
     const bool isPressed = (pDIS->itemState & ODS_SELECTED) != 0;
     const bool isPlaying = pData->isPlaying.load(std::memory_order_relaxed);
 
-    // Media Player color scheme - adapt to light/dark mode
-    const bool darkMode = IsDarkModeEnabled();
-    COLORREF bgColorTop, bgColorBottom, iconColor, borderColor;
-
-    if (darkMode)
-    {
-        bgColorTop = RGB(45, 45, 50);
-        bgColorBottom = RGB(35, 35, 40);
-        iconColor = RGB(220, 220, 220);
-        borderColor = RGB(120, 120, 125);
-    }
-    else
-    {
-        bgColorTop = RGB(200, 200, 205);
-        bgColorBottom = RGB(190, 190, 195);
-        iconColor = RGB(50, 50, 50);
-        borderColor = RGB(170, 170, 175);
-    }
+    // Media Player color scheme - dark background with gradient
+    COLORREF bgColorTop = RGB(45, 45, 50);
+    COLORREF bgColorBottom = RGB(35, 35, 40);
+    COLORREF iconColor = RGB(220, 220, 220);
+    COLORREF borderColor = RGB(120, 120, 125);
 
     if (isHover && !isDisabled)
     {
-        if (darkMode)
-        {
-            bgColorTop = RGB(60, 60, 65);
-            bgColorBottom = RGB(50, 50, 55);
-            iconColor = RGB(255, 255, 255);
-            borderColor = RGB(150, 150, 155);
-        }
-        else
-        {
-            bgColorTop = RGB(185, 185, 190);
-            bgColorBottom = RGB(175, 175, 180);
-            iconColor = RGB(30, 30, 30);
-            borderColor = RGB(150, 150, 155);
-        }
+        bgColorTop = RGB(60, 60, 65);
+        bgColorBottom = RGB(50, 50, 55);
+        iconColor = RGB(255, 255, 255);
+        borderColor = RGB(150, 150, 155);
     }
     if (isPressed && !isDisabled)
     {
-        if (darkMode)
-        {
-            bgColorTop = RGB(30, 30, 35);
-            bgColorBottom = RGB(25, 25, 30);
-            iconColor = RGB(200, 200, 200);
-        }
-        else
-        {
-            bgColorTop = RGB(170, 170, 175);
-            bgColorBottom = RGB(160, 160, 165);
-            iconColor = RGB(60, 60, 60);
-        }
+        bgColorTop = RGB(30, 30, 35);
+        bgColorBottom = RGB(25, 25, 30);
+        iconColor = RGB(200, 200, 200);
     }
     if (isDisabled)
     {
-        if (darkMode)
-        {
-            bgColorTop = RGB(40, 40, 45);
-            bgColorBottom = RGB(35, 35, 40);
-            iconColor = RGB(100, 100, 100);
-        }
-        else
-        {
-            bgColorTop = RGB(210, 210, 215);
-            bgColorBottom = RGB(200, 200, 205);
-            iconColor = RGB(170, 170, 170);
-        }
+        bgColorTop = RGB(40, 40, 45);
+        bgColorBottom = RGB(35, 35, 40);
+        iconColor = RGB(100, 100, 100);
     }
 
     int width = pDIS->rcItem.right - pDIS->rcItem.left;
@@ -5272,22 +5176,13 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
             Gdiplus::Graphics graphics(pDIS->hDC);
             graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-            // Clear background - match parent dialog
-            COLORREF bgColor = IsDarkModeEnabled() ? DarkMode::BackgroundColor : GetSysColor(COLOR_BTNFACE);
-            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, GetRValue(bgColor), GetGValue(bgColor), GetBValue(bgColor)));
+            // Dark background
+            Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 35, 35, 40));
             graphics.FillRectangle(&bgBrush, pDIS->rcItem.left, pDIS->rcItem.top, width, height);
 
             // Icon color - brighter on hover
             const bool isHover = pData && pData->hoverVolumeIcon;
-            COLORREF iconColor;
-            if (IsDarkModeEnabled())
-            {
-                iconColor = isHover ? RGB(255, 255, 255) : RGB(180, 180, 180);
-            }
-            else
-            {
-                iconColor = isHover ? RGB(30, 30, 30) : RGB(80, 80, 80);
-            }
+            COLORREF iconColor = isHover ? RGB(255, 255, 255) : RGB(180, 180, 180);
             Gdiplus::SolidBrush iconBrush(Gdiplus::Color(255, GetRValue(iconColor), GetGValue(iconColor), GetBValue(iconColor)));
             Gdiplus::Pen iconPen(Gdiplus::Color(255, GetRValue(iconColor), GetGValue(iconColor), GetBValue(iconColor)), 1.2f);
 

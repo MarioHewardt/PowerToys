@@ -127,6 +127,7 @@
 #define IDC_TRIM_APPEND                 1122
 #define IDC_RECORD_ASPECT_RATIO         1125
 #define IDC_VCAM_HOTKEY                 1126
+#define IDC_MIRROR_HOTKEY               1127
 #define IDC_VCAM                        40016
 #define IDC_SAVE                        40002
 #define IDC_COPY                        40004
@@ -143,7 +144,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        120
 #define _APS_NEXT_COMMAND_VALUE         40015
-#define _APS_NEXT_CONTROL_VALUE         1123
+#define _APS_NEXT_CONTROL_VALUE         1128
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

@@ -16,6 +16,7 @@
 #include "WindowsVersions.h"
 #include "ZoomItSettings.h"
 #include "GifRecordingSession.h"
+#include "MirrorSession.h"
 #include "WebcamPreviewWindow.h"
 #include "BreakTimer.h"
 #include "PanoramaCapture.h"
@@ -106,6 +107,7 @@ COLORREF	g_CustomColors[16];
 #define WEBCAM_TOGGLE_HOTKEY     21
 #define VCAM_HOTKEY              22
 #define VCAM_CROP_HOTKEY         23
+#define MIRROR_HOTKEY            24
 
 #define ZOOM_PAGE	  0
 #define LIVE_PAGE	  1
@@ -122,6 +124,7 @@ COLORREF	g_CustomColors[16];
 #define SNIP_PAGE	  7
 #define PANORAMA_PAGE 8
 #define VCAM_PAGE     9
+#define MIRROR_PAGE   10
 
 OPTION_TABS g_OptionsTabs[] = {
     { _T("Zoom"), NULL },
@@ -133,7 +136,8 @@ OPTION_TABS g_OptionsTabs[] = {
     { _T("Record"), NULL },
     { _T("Snip"), NULL },
     { _T("Panorama"), NULL },
-    { _T("VCam"), NULL }
+    { _T("VCam"), NULL },
+    { _T("Mirror"), NULL }
 };
 
 static const TCHAR* g_RecordingFormats[] = {
@@ -181,6 +185,7 @@ DWORD   g_SnipToggleMod;
 DWORD   g_SnipPanoramaToggleMod;
 DWORD   g_SnipOcrToggleMod;
 DWORD   g_VCamToggleMod;
+DWORD   g_MirrorToggleMod;
 BOOL    g_VCamToggle = FALSE;
 
 BOOLEAN	g_ZoomOnLiveZoom = FALSE;
@@ -225,6 +230,7 @@ std::wstring	g_ScreenshotSaveLocation;
 winrt::IDirect3DDevice	g_RecordDevice{ nullptr };
 std::shared_ptr<VideoRecordingSession> g_RecordingSession = nullptr;
 std::shared_ptr<GifRecordingSession> g_GifRecordingSession = nullptr;
+std::shared_ptr<MirrorSession> g_MirrorSession = nullptr;
 
 // Virtual camera globals
 SelectRectangle g_VCamSelectRectangle;
@@ -428,6 +434,7 @@ const wchar_t* HotkeyIdToString( WPARAM hotkeyId )
     case SNIP_PANORAMA_SAVE_HOTKEY: return L"SNIP_PANORAMA_SAVE_HOTKEY";
     case VCAM_HOTKEY: return L"VCAM_HOTKEY";
     case VCAM_CROP_HOTKEY: return L"VCAM_CROP_HOTKEY";
+    case MIRROR_HOTKEY: return L"MIRROR_HOTKEY";
     default: return L"UNKNOWN_HOTKEY";
     }
 }
@@ -453,6 +460,273 @@ static void LogHotkeyRegistrationResult( const wchar_t* phase, HWND hWnd, int ho
     UNREFERENCED_PARAMETER( key );
     UNREFERENCED_PARAMETER( success );
 #endif
+}
+
+struct MirrorMonitorInfo
+{
+    HMONITOR Monitor = nullptr;
+    MONITORINFOEXW Info{};
+};
+
+static std::vector<MirrorMonitorInfo> EnumerateMirrorMonitors()
+{
+    std::vector<MirrorMonitorInfo> monitors;
+    EnumDisplayMonitors( nullptr, nullptr,
+        []( HMONITOR monitor, HDC, LPRECT, LPARAM context ) -> BOOL
+        {
+            auto items = reinterpret_cast<std::vector<MirrorMonitorInfo>*>( context );
+            MirrorMonitorInfo info{};
+            info.Monitor = monitor;
+            info.Info.cbSize = sizeof( info.Info );
+            if( GetMonitorInfoW( monitor, &info.Info ) )
+            {
+                items->push_back( info );
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>( &monitors ) );
+    return monitors;
+}
+
+static const MirrorMonitorInfo* FindMirrorMonitor( const std::vector<MirrorMonitorInfo>& monitors, HMONITOR monitor )
+{
+    const auto it = std::find_if( monitors.begin(), monitors.end(), [monitor]( const MirrorMonitorInfo& item )
+    {
+        return item.Monitor == monitor;
+    } );
+    return it == monitors.end() ? nullptr : &*it;
+}
+
+static std::wstring MirrorMonitorLabel( const MirrorMonitorInfo& monitor )
+{
+    const RECT& rect = monitor.Info.rcMonitor;
+    wchar_t label[256]{};
+    swprintf_s( label,
+        L"%s%s (%ld x %ld at %ld,%ld)",
+        monitor.Info.szDevice,
+        ( monitor.Info.dwFlags & MONITORINFOF_PRIMARY ) ? L" primary" : L"",
+        rect.right - rect.left,
+        rect.bottom - rect.top,
+        rect.left,
+        rect.top );
+    return label;
+}
+
+static std::vector<DWORD> FindPowerPointProcessIds()
+{
+    std::vector<DWORD> processIds;
+    HANDLE snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 );
+    if( snapshot == INVALID_HANDLE_VALUE )
+    {
+        return processIds;
+    }
+
+    PROCESSENTRY32W processEntry{ sizeof( processEntry ) };
+    if( Process32FirstW( snapshot, &processEntry ) )
+    {
+        do
+        {
+            if( _wcsicmp( processEntry.szExeFile, L"POWERPNT.EXE" ) == 0 )
+            {
+                processIds.push_back( processEntry.th32ProcessID );
+            }
+        }
+        while( Process32NextW( snapshot, &processEntry ) );
+    }
+    CloseHandle( snapshot );
+    return processIds;
+}
+
+static bool RectMostlyCoversMonitor( const RECT& windowRect, const RECT& monitorRect )
+{
+    RECT overlap{};
+    if( !IntersectRect( &overlap, &windowRect, &monitorRect ) )
+    {
+        return false;
+    }
+
+    const long monitorWidth = monitorRect.right - monitorRect.left;
+    const long monitorHeight = monitorRect.bottom - monitorRect.top;
+    const long overlapWidth = overlap.right - overlap.left;
+    const long overlapHeight = overlap.bottom - overlap.top;
+    if( monitorWidth <= 0 || monitorHeight <= 0 )
+    {
+        return false;
+    }
+
+    const long long monitorArea = static_cast<long long>( monitorWidth ) * monitorHeight;
+    const long long overlapArea = static_cast<long long>( overlapWidth ) * overlapHeight;
+    return overlapArea * 100 >= monitorArea * 80;
+}
+
+static HMONITOR FindPowerPointPresentationMonitor( HMONITOR sourceMonitor, const std::vector<MirrorMonitorInfo>& candidates )
+{
+    const auto powerpointIds = FindPowerPointProcessIds();
+    if( powerpointIds.empty() )
+    {
+        return nullptr;
+    }
+
+    struct EnumContext
+    {
+        HMONITOR SourceMonitor;
+        const std::vector<MirrorMonitorInfo>* Candidates;
+        const std::vector<DWORD>* PowerPointIds;
+        HMONITOR Result = nullptr;
+    } context{ sourceMonitor, &candidates, &powerpointIds, nullptr };
+
+    EnumWindows( []( HWND window, LPARAM param ) -> BOOL
+    {
+        auto data = reinterpret_cast<EnumContext*>( param );
+        if( !IsWindowVisible( window ) || GetWindow( window, GW_OWNER ) != nullptr )
+        {
+            return TRUE;
+        }
+
+        DWORD processId = 0;
+        GetWindowThreadProcessId( window, &processId );
+        if( std::find( data->PowerPointIds->begin(), data->PowerPointIds->end(), processId ) == data->PowerPointIds->end() )
+        {
+            return TRUE;
+        }
+
+        RECT windowRect{};
+        if( !GetWindowRect( window, &windowRect ) )
+        {
+            return TRUE;
+        }
+
+        HMONITOR windowMonitor = MonitorFromWindow( window, MONITOR_DEFAULTTONULL );
+        if( windowMonitor == nullptr || windowMonitor == data->SourceMonitor )
+        {
+            return TRUE;
+        }
+
+        const auto* monitorInfo = FindMirrorMonitor( *data->Candidates, windowMonitor );
+        if( monitorInfo != nullptr && RectMostlyCoversMonitor( windowRect, monitorInfo->Info.rcMonitor ) )
+        {
+            data->Result = windowMonitor;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>( &context ) );
+
+    return context.Result;
+}
+
+static HMONITOR PickMirrorTargetMonitor( HWND hWnd, HMONITOR sourceMonitor )
+{
+    auto monitors = EnumerateMirrorMonitors();
+    std::vector<MirrorMonitorInfo> candidates;
+    for( const auto& monitor : monitors )
+    {
+        if( monitor.Monitor != sourceMonitor )
+        {
+            candidates.push_back( monitor );
+        }
+    }
+
+    if( candidates.empty() )
+    {
+        MessageBox( hWnd, L"Mirror requires an extended display.", APPNAME, MB_OK | MB_ICONINFORMATION );
+        return nullptr;
+    }
+
+    if( HMONITOR powerpointMonitor = FindPowerPointPresentationMonitor( sourceMonitor, candidates ) )
+    {
+        return powerpointMonitor;
+    }
+
+    if( candidates.size() == 1 )
+    {
+        return candidates.front().Monitor;
+    }
+
+    std::vector<std::wstring> labels;
+    std::vector<TASKDIALOG_BUTTON> buttons;
+    labels.reserve( candidates.size() );
+    buttons.reserve( candidates.size() );
+    for( size_t index = 0; index < candidates.size(); ++index )
+    {
+        labels.push_back( MirrorMonitorLabel( candidates[index] ) );
+        buttons.push_back( TASKDIALOG_BUTTON{ static_cast<int>( 1000 + index ), labels.back().c_str() } );
+    }
+
+    TASKDIALOGCONFIG config{};
+    config.cbSize = sizeof( config );
+    config.hwndParent = hWnd;
+    config.hInstance = g_hInstance;
+    config.dwFlags = TDF_USE_COMMAND_LINKS;
+    config.pszWindowTitle = APPNAME;
+    config.pszMainInstruction = L"Choose a display for Mirror";
+    config.pszContent = L"ZoomIt found more than one extended display. Select the screen that should show the mirrored presenter desktop.";
+    config.pButtons = buttons.data();
+    config.cButtons = static_cast<UINT>( buttons.size() );
+    config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+
+    int selected = IDCANCEL;
+    if( FAILED( TaskDialogIndirect( &config, &selected, nullptr, nullptr ) ) || selected == IDCANCEL )
+    {
+        return nullptr;
+    }
+
+    const int selectedIndex = selected - 1000;
+    if( selectedIndex < 0 || selectedIndex >= static_cast<int>( candidates.size() ) )
+    {
+        return nullptr;
+    }
+
+    wcscpy_s( g_MirrorTargetDeviceName, candidates[static_cast<size_t>( selectedIndex )].Info.szDevice );
+    reg.WriteRegSettings( RegSettings );
+    return candidates[static_cast<size_t>( selectedIndex )].Monitor;
+}
+
+static void StopMirror()
+{
+    if( g_MirrorSession != nullptr )
+    {
+        g_MirrorSession->Stop();
+        g_MirrorSession.reset();
+    }
+}
+
+static void ToggleMirror( HWND hWnd )
+{
+    if( g_MirrorSession != nullptr )
+    {
+        StopMirror();
+        return;
+    }
+
+    bool isCaptureSupported = false;
+    try
+    {
+        isCaptureSupported = winrt::GraphicsCaptureSession::IsSupported();
+    }
+    catch( const winrt::hresult_error& ) {}
+
+    if( !isCaptureSupported )
+    {
+        MessageBox( hWnd, L"Mirror requires Windows 10, May 2019 Update or higher.", APPNAME, MB_OK | MB_ICONINFORMATION );
+        return;
+    }
+
+    POINT cursorPos{};
+    GetCursorPos( &cursorPos );
+    HMONITOR sourceMonitor = MonitorFromPoint( cursorPos, MONITOR_DEFAULTTONEAREST );
+    HMONITOR targetMonitor = PickMirrorTargetMonitor( hWnd, sourceMonitor );
+    if( targetMonitor == nullptr || targetMonitor == sourceMonitor )
+    {
+        return;
+    }
+
+    auto session = std::make_shared<MirrorSession>( sourceMonitor, targetMonitor );
+    if( !session->Start() )
+    {
+        MessageBox( hWnd, L"Mirror could not start on the selected display.", APPNAME, MB_OK | MB_ICONERROR );
+        return;
+    }
+    g_MirrorSession = session;
 }
 
 static void LogPanoramaState( const wchar_t* phase, WPARAM hotkeyId = static_cast<WPARAM>(-1) )
@@ -3330,6 +3604,7 @@ void UnregisterAllHotkeys( HWND hWnd )
     unregisterHotkey( COPY_CROP_HOTKEY );
     unregisterHotkey( VCAM_HOTKEY );
     unregisterHotkey( VCAM_CROP_HOTKEY );
+    unregisterHotkey( MIRROR_HOTKEY );
 }
 
 //----------------------------------------------------------------------------
@@ -3377,6 +3652,7 @@ void RegisterAllHotkeys(HWND hWnd)
         registerHotkey( VCAM_HOTKEY, g_VCamToggleMod | MOD_NOREPEAT, g_VCamToggleKey & 0xFF );
         registerHotkey( VCAM_CROP_HOTKEY, ( g_VCamToggleMod ^ MOD_SHIFT ) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF );
     }
+    if( g_MirrorToggleKey )     registerHotkey( MIRROR_HOTKEY, g_MirrorToggleMod | MOD_NOREPEAT, g_MirrorToggleKey & 0xFF );
 
     // Note: COPY_IMAGE_HOTKEY, COPY_CROP_HOTKEY (Ctrl+C, Ctrl+Shift+C) and
     // SAVE_IMAGE_HOTKEY, SAVE_CROP_HOTKEY (Ctrl+S, Ctrl+Shift+S) are registered
@@ -4588,8 +4864,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
     static RECT     stableWindowRect{};
     static bool     stableWindowRectValid = false;
     TCHAR			text[32];
-    DWORD			newToggleKey, newTimeout, newToggleMod, newBreakToggleKey, newDemoTypeToggleKey, newRecordToggleKey, newSnipToggleKey, newSnipPanoramaToggleKey, newSnipOcrToggleKey;
-    DWORD			newDrawToggleKey, newDrawToggleMod, newBreakToggleMod, newDemoTypeToggleMod, newRecordToggleMod, newSnipToggleMod, newSnipPanoramaToggleMod, newSnipOcrToggleMod;
+    DWORD			newToggleKey, newTimeout, newToggleMod, newBreakToggleKey, newDemoTypeToggleKey, newRecordToggleKey, newSnipToggleKey, newSnipPanoramaToggleKey, newSnipOcrToggleKey, newMirrorToggleKey;
+    DWORD			newDrawToggleKey, newDrawToggleMod, newBreakToggleMod, newDemoTypeToggleMod, newRecordToggleMod, newSnipToggleMod, newSnipPanoramaToggleMod, newSnipOcrToggleMod, newMirrorToggleMod;
     DWORD			newLiveZoomToggleKey, newLiveZoomToggleMod;
     static std::vector<std::pair<std::wstring, std::wstring>>	microphones;
     static std::vector<std::pair<std::wstring, std::wstring>>	webcams;
@@ -4828,6 +5104,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         if( g_SnipPanoramaToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_SETHOTKEY, g_SnipPanoramaToggleKey, 0 );
         if( g_SnipOcrToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_SETHOTKEY, g_SnipOcrToggleKey, 0 );
         if( g_VCamToggleKey ) SendMessage( GetDlgItem( g_OptionsTabs[VCAM_PAGE].hPage, IDC_VCAM_HOTKEY), HKM_SETHOTKEY, g_VCamToggleKey, 0 );
+        if( g_MirrorToggleKey ) SendMessage( GetDlgItem( g_OptionsTabs[MIRROR_PAGE].hPage, IDC_MIRROR_HOTKEY), HKM_SETHOTKEY, g_MirrorToggleKey, 0 );
         CheckDlgButton( hDlg, IDC_SHOW_TRAY_ICON,
             g_ShowTrayIcon ? BST_CHECKED: BST_UNCHECKED );
         CheckDlgButton( hDlg, IDC_AUTOSTART,
@@ -5367,6 +5644,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipPanoramaToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             newSnipOcrToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             DWORD newVCamToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[VCAM_PAGE].hPage, IDC_VCAM_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
+            newMirrorToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[MIRROR_PAGE].hPage, IDC_MIRROR_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
 
             newToggleMod = GetKeyMod( newToggleKey );
             newLiveZoomToggleMod = GetKeyMod( newLiveZoomToggleKey );
@@ -5378,6 +5656,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipPanoramaToggleMod = GetKeyMod( newSnipPanoramaToggleKey );
             newSnipOcrToggleMod = GetKeyMod( newSnipOcrToggleKey );
             DWORD newVCamToggleMod = GetKeyMod( newVCamToggleKey );
+            newMirrorToggleMod = GetKeyMod( newMirrorToggleKey );
 
             g_SliderZoomLevel = static_cast<int>(SendMessage( GetDlgItem(g_OptionsTabs[ZOOM_PAGE].hPage, IDC_ZOOM_SLIDER), TBM_GETPOS, 0, 0 ));
             g_DemoTypeSpeedSlider = static_cast<int>(SendMessage( GetDlgItem( g_OptionsTabs[DEMOTYPE_PAGE].hPage, IDC_DEMOTYPE_SPEED_SLIDER ), TBM_GETPOS, 0, 0 ));
@@ -5499,6 +5778,15 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 UnregisterAllHotkeys(GetParent(hDlg));
                 break;
 
+            }
+            else if( newMirrorToggleKey &&
+                !RegisterHotKey(GetParent(hDlg), MIRROR_HOTKEY, newMirrorToggleMod | MOD_NOREPEAT, newMirrorToggleKey & 0xFF)) {
+
+                MessageBox(hDlg, L"The specified mirror hotkey is already in use.\nSelect a different mirror hotkey.",
+                    APPNAME, MB_ICONERROR);
+                UnregisterAllHotkeys(GetParent(hDlg));
+                break;
+
             } else {
 
                 g_BreakTimeout = newTimeout;
@@ -5521,6 +5809,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 g_SnipOcrToggleMod = newSnipOcrToggleMod;
                 g_VCamToggleKey = newVCamToggleKey;
                 g_VCamToggleMod = newVCamToggleMod;
+                g_MirrorToggleKey = newMirrorToggleKey;
+                g_MirrorToggleMod = newMirrorToggleMod;
                 reg.WriteRegSettings( RegSettings );
                 EnableDisableTrayIcon( GetParent( hDlg ), g_ShowTrayIcon );
 
@@ -7688,6 +7978,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipOcrToggleMod = GetKeyMod( g_SnipOcrToggleKey );
         g_RecordToggleMod = GetKeyMod( g_RecordToggleKey );
         g_VCamToggleMod = GetKeyMod( g_VCamToggleKey );
+        g_MirrorToggleMod = GetKeyMod( g_MirrorToggleKey );
 
         if( !g_OptionsShown && !g_StartedByPowerToys ) {
             // First run should show options when running as standalone. If not running as standalone,
@@ -7776,6 +8067,13 @@ LRESULT APIENTRY MainWndProc(
                  !RegisterHotKey(hWnd, VCAM_CROP_HOTKEY, (g_VCamToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF))) {
 
                 MessageBox(hWnd, L"The specified virtual camera hotkey is already in use.\nSelect a different virtual camera hotkey.",
+                    APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+            }
+            if( g_MirrorToggleKey &&
+                !RegisterHotKey(hWnd, MIRROR_HOTKEY, g_MirrorToggleMod | MOD_NOREPEAT, g_MirrorToggleKey & 0xFF)) {
+
+                MessageBox(hWnd, L"The specified mirror hotkey is already in use.\nSelect a different mirror hotkey.",
                     APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
             }
@@ -8535,6 +8833,10 @@ LRESULT APIENTRY MainWndProc(
             {
                 StopRecording();
             }
+            break;
+
+        case MIRROR_HOTKEY:
+            ToggleMirror( hWnd );
             break;
 
         case VCAM_HOTKEY:
@@ -10368,6 +10670,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipOcrToggleMod = GetKeyMod(g_SnipOcrToggleKey);
         g_RecordToggleMod = GetKeyMod(g_RecordToggleKey);
         g_VCamToggleMod = GetKeyMod(g_VCamToggleKey);
+        g_MirrorToggleMod = GetKeyMod(g_MirrorToggleKey);
         BOOL showOptions = FALSE;
         if (g_ToggleKey)
         {
@@ -10454,6 +10757,14 @@ LRESULT APIENTRY MainWndProc(
                 !RegisterHotKey(hWnd, VCAM_CROP_HOTKEY, (g_VCamToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, g_VCamToggleKey & 0xFF))
             {
                 MessageBox(hWnd, L"The specified virtual camera hotkey is already in use.\nSelect a different virtual camera hotkey.", APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+            }
+        }
+        if (g_MirrorToggleKey)
+        {
+            if (!RegisterHotKey(hWnd, MIRROR_HOTKEY, g_MirrorToggleMod | MOD_NOREPEAT, g_MirrorToggleKey & 0xFF))
+            {
+                MessageBox(hWnd, L"The specified mirror hotkey is already in use.\nSelect a different mirror hotkey.", APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
             }
         }
@@ -11283,7 +11594,12 @@ LRESULT APIENTRY MainWndProc(
         }
         break;
 
+    case WM_DISPLAYCHANGE:
+        StopMirror();
+        break;
+
     case WM_DESTROY:
+        StopMirror();
         // Restore screensaver settings on clean shutdown in case the
         // break screensaver was still active.
         if( HasOrphanedScreenSaverSettings() )

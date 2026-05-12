@@ -321,6 +321,15 @@ BEGIN
     LTEXT           "Requires Windows 11.",IDC_STATIC,7,63,245,10
 END
 
+MIRROR DIALOGEX 0, 0, 260, 86
+STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS | WS_SYSMENU
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "Mirror the desktop where you enable this hotkey to an extended display. ZoomIt chooses the PowerPoint presentation screen when detected, otherwise the only other display, or asks when there are multiple choices.",IDC_STATIC,7,7,245,35
+    LTEXT           "Mirror Toggle:",IDC_STATIC,7,58,55,8
+    CONTROL         "",IDC_MIRROR_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,67,56,80,12
+END
+
 DEMOTYPE DIALOGEX 0, 0, 260, 249
 STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS | WS_SYSMENU
 FONT 8, "MS Shell Dlg", 400, 0, 0x1

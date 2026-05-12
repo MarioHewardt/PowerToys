@@ -31,8 +31,7 @@ WebcamCapture::WebcamCapture(
     UINT outputHeight,
     Position position,
     Size size,
-    Shape shape,
-    bool fullScreenRecording )
+    Shape shape )
     : m_d3dDevice( device )
     , m_d3dContext( context )
     , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
@@ -41,7 +40,6 @@ WebcamCapture::WebcamCapture(
     , m_position( position )
     , m_size( size )
     , m_shape( shape )
-    , m_fullScreenRecording( fullScreenRecording )
 {
 }
 
@@ -229,7 +227,7 @@ bool WebcamCapture::WaitForFirstFrame( int timeoutMs )
 {
     std::unique_lock<std::mutex> lock( m_readyMutex );
     m_readyCV.wait_for( lock, std::chrono::milliseconds( timeoutMs ),
-                        [this]{ return m_firstFrameCaptured || m_initFailed.load( std::memory_order_acquire ); } );
+                        [this]{ return m_firstFrameCaptured; } );
     return m_firstFrameCaptured;
 }
 
@@ -271,13 +269,6 @@ void WebcamCapture::CaptureThread()
     if( !InitSourceReader() )
     {
         OutputDebug( L"[WebcamCapture] InitSourceReader failed on capture thread\n" );
-        m_initFailed.store( true, std::memory_order_release );
-        // Wake up WaitForFirstFrame so it doesn't block for the full timeout.
-        {
-            std::lock_guard<std::mutex> lock( m_readyMutex );
-            m_firstFrameCaptured = false;
-        }
-        m_readyCV.notify_all();
         CoUninitialize();
         return;
     }
@@ -459,7 +450,7 @@ void WebcamCapture::CaptureThread()
             UINT srcCropX = 0, srcCropY = 0;
             UINT srcCropW = m_camWidth, srcCropH = m_camHeight;
 
-            if( (m_size == FullScreen || m_shape == Circle || m_shape == RoundedSquare) && !m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
+            if( m_size == FullScreen && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
             {
                 // Compare aspect ratios: camera vs output.
                 // Scale camera so it fills the output, then crop excess.
@@ -486,9 +477,7 @@ void WebcamCapture::CaptureThread()
             const float halfW = ovW * 0.5f;
             const float halfH = ovH * 0.5f;
             // Rounded-rect corner radius: 10% of the smaller dimension.
-            // Rounded-square corner radius: 40% for exaggerated rounding.
-            const float cornerRadius = min( halfW, halfH ) *
-                ( m_shape == RoundedSquare ? 0.40f : 0.10f );
+            const float cornerRadius = min( halfW, halfH ) * 0.10f;
 
             for( UINT y = 0; y < ovH; y++ )
             {
@@ -512,7 +501,7 @@ void WebcamCapture::CaptureThread()
                         float dy = ( y + 0.5f - halfH ) / radius;
                         inside = ( dx * dx + dy * dy ) <= 1.0f;
                     }
-                    else if( m_shape == RoundedRect || m_shape == RoundedSquare )
+                    else if( m_shape == RoundedRect )
                     {
                         // Check corners only — the interior and edges are always inside.
                         float px = static_cast<float>( x ) + 0.5f;
@@ -619,30 +608,6 @@ RECT WebcamCapture::ComputeDestRect() const
     // Full screen: overlay covers the entire output area (no edges).
     if( m_size == FullScreen )
     {
-        // In fullscreen recording mode, letterbox/pillarbox the webcam
-        // to preserve its full field of view without magnification.
-        if( m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 )
-        {
-            double camAspect = static_cast<double>( m_camWidth ) / m_camHeight;
-            double outAspect = static_cast<double>( m_outputWidth ) / m_outputHeight;
-            LONG fitW, fitH;
-            if( camAspect > outAspect )
-            {
-                // Camera is wider — fit to width, pillarbox top/bottom.
-                fitW = static_cast<LONG>( m_outputWidth );
-                fitH = static_cast<LONG>( m_outputWidth / camAspect + 0.5 );
-            }
-            else
-            {
-                // Camera is taller — fit to height, letterbox sides.
-                fitH = static_cast<LONG>( m_outputHeight );
-                fitW = static_cast<LONG>( m_outputHeight * camAspect + 0.5 );
-            }
-            LONG x = ( static_cast<LONG>( m_outputWidth ) - fitW ) / 2;
-            LONG y = ( static_cast<LONG>( m_outputHeight ) - fitH ) / 2;
-            return RECT{ x, y, x + fitW, y + fitH };
-        }
-
         return RECT{ 0, 0,
                      static_cast<LONG>( m_outputWidth ),
                      static_cast<LONG>( m_outputHeight ) };
@@ -664,16 +629,6 @@ RECT WebcamCapture::ComputeDestRect() const
         overlayW = static_cast<int>( m_outputWidth ) - margin * 2;
     if( overlayH > static_cast<int>( m_outputHeight ) - margin * 2 )
         overlayH = static_cast<int>( m_outputHeight ) - margin * 2;
-
-    // For circle and rounded-square shapes, make the bounding box square
-    // (use the smaller dimension).  The webcam source is center-cropped
-    // to fill this square.
-    if( m_shape == Circle || m_shape == RoundedSquare )
-    {
-        int diameter = min( overlayW, overlayH );
-        overlayW = diameter;
-        overlayH = diameter;
-    }
 
     RECT dst = {};
     switch( m_position )
@@ -726,8 +681,10 @@ void WebcamCapture::ComputeOverlayDimensions()
 //----------------------------------------------------------------------------
 bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 {
-    if( !m_enabled.load( std::memory_order_relaxed ) )
+    if( !m_enabled.load() )
+    {
         return false;
+    }
 
 #if _DEBUG
     m_compositeCount++;
@@ -941,9 +898,6 @@ bool WebcamCapture::CompositeOnto( ID3D11Texture2D* target )
 //----------------------------------------------------------------------------
 bool WebcamCapture::GetLatestPixels( std::vector<BYTE>& outPixels, UINT& outW, UINT& outH )
 {
-    if( !m_enabled.load( std::memory_order_relaxed ) )
-        return false;
-
     std::lock_guard<std::mutex> lock( m_frameLock );
     if( m_pendingPixels.empty() || m_pendingW == 0 || m_pendingH == 0 )
         return false;

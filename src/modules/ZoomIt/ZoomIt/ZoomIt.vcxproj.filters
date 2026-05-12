@@ -36,6 +36,9 @@
     <ClCompile Include="LoopbackCapture.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="MirrorSession.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="DemoType.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -93,6 +96,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="LoopbackCapture.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="MirrorSession.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="DemoType.h">

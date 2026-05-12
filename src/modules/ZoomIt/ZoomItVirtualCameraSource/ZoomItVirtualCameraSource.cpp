@@ -21,6 +21,7 @@
 #include <new>
 #include <stdio.h>
 #include <string>
+#include <string.h>
 #include <propvarutil.h>
 
 #pragma comment( lib, "mfplat.lib" )
@@ -29,6 +30,7 @@
 #pragma warning( disable : 26403 )
 
 #include "..\ZoomIt\VirtualCameraIds.h"
+#include "..\ZoomIt\VirtualCameraSharedMem.h"
 
 namespace
 {
@@ -126,61 +128,7 @@ namespace
             *pp = m_spSD; m_spSD->AddRef(); return S_OK;
         }
 
-        STDMETHODIMP RequestSample( IUnknown* pToken ) override
-        {
-            if( m_streamState != MF_STREAM_STATE_RUNNING )
-                return MF_E_INVALIDREQUEST;
-
-            DllLog( L"[VCamStream] RequestSample\n" );
-
-            // Create a sample with an NV12 buffer
-            IMFSample* sample = nullptr;
-            IMFMediaBuffer* buffer = nullptr;
-
-            // NV12: Y plane = w*h, UV plane = w*h/2
-            const DWORD nv12Size = kWidth * kHeight * 3 / 2;
-
-            HRESULT hr = MFCreateSample( &sample );
-            if( FAILED( hr ) ) return hr;
-
-            hr = MFCreateMemoryBuffer( nv12Size, &buffer );
-            if( FAILED( hr ) ) { sample->Release(); return hr; }
-
-            // Fill with solid green: Y=149, U=43, V=21
-            BYTE* data = nullptr;
-            DWORD maxLen = 0;
-            hr = buffer->Lock( &data, &maxLen, nullptr );
-            if( SUCCEEDED( hr ) )
-            {
-                // Y plane
-                memset( data, 149, kWidth * kHeight );
-                // UV plane (interleaved U,V pairs)
-                BYTE* uv = data + kWidth * kHeight;
-                for( DWORD i = 0; i < kWidth * kHeight / 2; i += 2 )
-                {
-                    uv[i] = 43;      // U
-                    uv[i + 1] = 21;  // V
-                }
-                buffer->Unlock();
-            }
-            buffer->SetCurrentLength( nv12Size );
-
-            sample->AddBuffer( buffer );
-            buffer->Release();
-
-            sample->SetSampleTime( MFGetSystemTime() );
-            sample->SetSampleDuration( kFrameDuration );
-
-            if( pToken )
-                sample->SetUnknown( MFSampleExtension_Token, pToken );
-
-            // Queue MEMediaSample event with the sample
-            if( m_spEQ )
-                m_spEQ->QueueEventParamUnk( MEMediaSample, GUID_NULL, S_OK, sample );
-
-            sample->Release();
-            return S_OK;
-        }
+        STDMETHODIMP RequestSample( IUnknown* pToken ) override;
 
         // IMFMediaStream2
         STDMETHODIMP SetStreamState( MF_STREAM_STATE state ) override
@@ -317,6 +265,30 @@ namespace
 
             m_spPD->SelectStream( 0 );
             m_state = State::Stopped;
+
+            // Create Global\ named shared memory for frame transfer.
+            // Running as SYSTEM, we can create Global\ objects.
+            // Use a null DACL so ZoomIt (user session) can open and write.
+            SECURITY_ATTRIBUTES secAttr{};
+            secAttr.nLength = sizeof( secAttr );
+            SECURITY_DESCRIPTOR secDesc{};
+            InitializeSecurityDescriptor( &secDesc, SECURITY_DESCRIPTOR_REVISION );
+            SetSecurityDescriptorDacl( &secDesc, TRUE, nullptr, FALSE );
+            secAttr.lpSecurityDescriptor = &secDesc;
+
+            m_hSharedMem = CreateFileMappingW( INVALID_HANDLE_VALUE, &secAttr, PAGE_READWRITE,
+                0, kVCamSharedMemSize, kVCamSharedMemName );
+            if( m_hSharedMem )
+            {
+                m_pMappedView = static_cast<const BYTE*>(
+                    MapViewOfFile( m_hSharedMem, FILE_MAP_READ, 0, 0, kVCamSharedMemSize ) );
+                DllLog( L"[VCamSrc] Shared memory created: %s view=%p\n", kVCamSharedMemName, m_pMappedView );
+            }
+            else
+            {
+                DllLog( L"[VCamSrc] CreateFileMapping failed: %lu\n", GetLastError() );
+            }
+
             return S_OK;
         }
 
@@ -425,6 +397,9 @@ namespace
             if( m_spEventQueue ) { m_spEventQueue->Shutdown(); m_spEventQueue->Release(); m_spEventQueue = nullptr; }
             if( m_spPD ) { m_spPD->Release(); m_spPD = nullptr; }
             if( m_spAttributes ) { m_spAttributes->Release(); m_spAttributes = nullptr; }
+            if( m_pMappedView ) { UnmapViewOfFile( m_pMappedView ); m_pMappedView = nullptr; }
+            if( m_hSharedMem ) { CloseHandle( m_hSharedMem ); m_hSharedMem = nullptr; }
+            if( m_hMutex ) { CloseHandle( m_hMutex ); m_hMutex = nullptr; }
             return S_OK;
         }
 
@@ -459,12 +434,22 @@ namespace
         STDMETHODIMP KsEvent( PKSEVENT, ULONG, LPVOID, ULONG, ULONG* ) override
         { return HRESULT_FROM_WIN32( ERROR_SET_NOT_FOUND ); }
 
+        // Returns a persistent read-only view of the shared frame data.
+        // The view stays mapped for the lifetime of the source.
+        const BYTE* GetMappedView()
+        {
+            return m_pMappedView;
+        }
+
     private:
         enum class State { Invalid, Stopped, Started, Shutdown };
         ProbeMediaStream* m_spStream = nullptr;
         IMFMediaEventQueue* m_spEventQueue = nullptr;
         IMFPresentationDescriptor* m_spPD = nullptr;
         IMFAttributes* m_spAttributes = nullptr;
+        HANDLE m_hSharedMem = nullptr;
+        HANDLE m_hMutex = nullptr;
+        const BYTE* m_pMappedView = nullptr;
         State m_state = State::Invalid;
         std::atomic<ULONG> m_ref{ 1 };
     };
@@ -476,6 +461,74 @@ namespace
         if( !m_parent ) return E_UNEXPECTED;
         *pp = static_cast<IMFMediaSource*>( m_parent );
         m_parent->AddRef();
+        return S_OK;
+    }
+
+    // Implement RequestSample after ProbeMediaSource is defined (needs GetSharedMemHandle)
+    STDMETHODIMP ProbeMediaStream::RequestSample( IUnknown* pToken )
+    {
+        if( m_streamState != MF_STREAM_STATE_RUNNING )
+            return MF_E_INVALIDREQUEST;
+
+        IMFSample* sample = nullptr;
+        IMFMediaBuffer* buffer = nullptr;
+        const size_t nv12Size = static_cast<size_t>( kWidth ) * kHeight * 3 / 2;
+
+        HRESULT hr = MFCreateSample( &sample );
+        if( FAILED( hr ) ) return hr;
+
+        hr = MFCreateMemoryBuffer( static_cast<DWORD>( nv12Size ), &buffer );
+        if( FAILED( hr ) ) { sample->Release(); return hr; }
+
+        BYTE* data = nullptr;
+        DWORD maxLen = 0;
+        hr = buffer->Lock( &data, &maxLen, nullptr );
+        if( SUCCEEDED( hr ) )
+        {
+            bool gotFrame = false;
+
+            // Read from the persistent mapped view of the shared file
+            const BYTE* view = m_parent ? m_parent->GetMappedView() : nullptr;
+            if( view )
+            {
+                auto* hdr = reinterpret_cast<const VCamSharedFrameHeader*>( view );
+                if( hdr->frameNumber > 0 && hdr->dataSize == static_cast<UINT32>( nv12Size ) )
+                {
+                    const BYTE* src = view + sizeof( VCamSharedFrameHeader );
+                    for( size_t i = 0; i < nv12Size; i++ ) data[i] = src[i];
+                    gotFrame = true;
+                }
+            }
+
+            if( !gotFrame )
+            {
+                // Fallback: solid green
+                memset( data, 149, kWidth * kHeight );
+                BYTE* uv = data + kWidth * kHeight;
+                for( DWORD i = 0; i < kWidth * kHeight / 2; i += 2 )
+                {
+                    uv[i] = 43;
+                    uv[i + 1] = 21;
+                }
+            }
+
+            buffer->Unlock();
+        }
+        buffer->SetCurrentLength( static_cast<DWORD>( nv12Size ) );
+
+        sample->AddBuffer( buffer );
+        buffer->Release();
+
+        sample->SetSampleTime( MFGetSystemTime() );
+        sample->SetSampleDuration( kFrameDuration );
+
+        if( pToken )
+            sample->SetUnknown( MFSampleExtension_Token, pToken );
+
+        if( m_spEQ )
+            m_spEQ->QueueEventParamUnk( MEMediaSample, GUID_NULL, S_OK, sample );
+
+        sample->Release();
         return S_OK;
     }
 

@@ -33,7 +33,7 @@ public:
     enum Size { Small = 0, Medium = 1, Large = 2, XLarge = 3, FullScreen = 4 };
 
     // Shape constants matching g_WebcamShape values.
-    enum Shape { Square = 0, RoundedRect = 1, RoundedSquare = 2, Circle = 3 };
+    enum Shape { Square = 0, RoundedRect = 1, Circle = 2 };
 
     WebcamCapture(
         winrt::com_ptr<ID3D11Device> const& device,
@@ -43,8 +43,7 @@ public:
         UINT outputHeight,
         Position position,
         Size size,
-        Shape shape,
-        bool fullScreenRecording = false );
+        Shape shape );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -59,6 +58,9 @@ public:
     // Must be called from the thread that owns m_d3dContext.
     // Returns true if a frame was composited.
     bool CompositeOnto( ID3D11Texture2D* target );
+
+    bool IsEnabled() const { return m_enabled.load(); }
+    void SetEnabled( bool enabled ) { m_enabled.store( enabled ); }
 
     // Copy the latest pre-scaled BGRA pixels for on-screen preview.
     // Thread-safe (acquires m_frameLock).  Returns true if pixels were copied.
@@ -90,16 +92,6 @@ public:
 
     // Return the overlay shape.
     Shape GetShape() const { return m_shape; }
-
-    // Enable or disable compositing.  When disabled, CompositeOnto and
-    // GetLatestPixels return false without doing any work.  The capture
-    // thread continues running so re-enabling is instant.
-    void SetEnabled( bool enabled ) { m_enabled.store( enabled, std::memory_order_relaxed ); }
-    bool IsEnabled() const { return m_enabled.load( std::memory_order_relaxed ); }
-
-    // Returns true if the capture thread failed to initialize the camera
-    // (e.g. device in use by another application).
-    bool HasInitFailed() const { return m_initFailed.load( std::memory_order_acquire ); }
 
 private:
     void CaptureThread();
@@ -148,13 +140,11 @@ private:
     Position                            m_position = BottomRight;
     Size                                m_size = Medium;
     Shape                               m_shape = Square;
-    bool                                m_fullScreenRecording = false;
 
     // Capture thread.
     std::thread                         m_thread;
     std::atomic<bool>                   m_running{ false };
     std::atomic<bool>                   m_enabled{ true };
-    std::atomic<bool>                   m_initFailed{ false };
     bool                                m_mfStarted = false;
 
     // Signalled once the first webcam frame has been captured so
