@@ -220,6 +220,9 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
         m_erodeBuf.resize( modelPixels );
 
         // Extract person scores at model resolution from the raw array.
+        // Apply a hard threshold to produce a binary mask.  This is much
+        // faster than a sigmoid (no expf) and eliminates the partial-blur
+        // halo that was bleeding onto body/head edges.
         for( int64_t y = 0; y < outH; y++ )
         {
             for( int64_t x = 0; x < outW; x++ )
@@ -233,21 +236,10 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
                 {
                     float bg = outData[0 * outH * outW + y * outW + x];
                     float fg = outData[1 * outH * outW + y * outW + x];
-                    float maxVal = (std::max)( bg, fg );
-                    float expBg = expf( bg - maxVal );
-                    float expFg = expf( fg - maxVal );
-                    personScore = expFg / ( expBg + expFg );
+                    personScore = ( fg > bg ) ? 1.0f : 0.0f;
                 }
 
-                personScore = (std::max)( 0.0f, (std::min)( 1.0f, personScore ) );
-
-                // Sigmoid sharpening: center at 0.55 so borderline pixels
-                // (e.g. light sofa near a person) are pushed to background.
-                constexpr float kSigmoidStrength = 12.0f;
-                constexpr float kSigmoidCenter  = 0.55f;
-                personScore = 1.0f / ( 1.0f + expf( -kSigmoidStrength * ( personScore - kSigmoidCenter ) ) );
-
-                m_erodeBuf[static_cast<size_t>( y * outW + x )] = personScore;
+                m_erodeBuf[static_cast<size_t>( y * outW + x )] = ( personScore > 0.5f ) ? 1.0f : 0.0f;
             }
         }
 
@@ -356,88 +348,47 @@ static void VerticalBoxBlur(
 //----------------------------------------------------------------------------
 // BackgroundBlur::ApplyBlurWithMask
 //
-// Downscales the frame, blurs at reduced resolution, upscales the
-// blurred result, then blends original and blurred at full resolution
-// based on the segmentation mask.  This is ~16× faster than blurring
-// at full-screen resolution.
+// Downscales the frame to a small working size, blurs there, then
+// performs a single full-resolution pass that blends the original
+// pixels with the upscaled blurred pixels according to the mask.
 //----------------------------------------------------------------------------
 void BackgroundBlur::ApplyBlurWithMask( uint8_t* bgraPixels, uint32_t width, uint32_t height, int blurRadius )
 {
-    // For small frames (overlays), blur directly at full resolution.
-    // For large frames (full-screen), downscale first.
-    const uint32_t kMaxDirectPixels = 400 * 400;
-    const uint32_t totalPixels = width * height;
+    const size_t frameBytes = static_cast<size_t>( width ) * height * 4;
+    m_blurredFrame.resize( frameBytes );
+    m_tempFrame.resize( frameBytes );
 
-    uint32_t blurW, blurH;
-    if( totalPixels <= kMaxDirectPixels )
-    {
-        blurW = width;
-        blurH = height;
-    }
-    else
-    {
-        // Downscale so the blur area is ~kMaxDirectPixels.
-        // This gives roughly 1/4 resolution at 1080p.
-        float scale = sqrtf( static_cast<float>( kMaxDirectPixels ) / totalPixels );
-        blurW = (std::max)( 1u, static_cast<uint32_t>( width * scale ) );
-        blurH = (std::max)( 1u, static_cast<uint32_t>( height * scale ) );
-    }
+    // The input is already capped at 960×540 by WebcamCapture, so blur
+    // directly — no need for a secondary downscale.
+    int effectiveRadius = (std::max)( 3, blurRadius );
 
-    const size_t blurBytes = static_cast<size_t>( blurW ) * blurH * 4;
-    m_smallFrame.resize( blurBytes );
-    m_blurredFrame.resize( blurBytes );
-    m_tempFrame.resize( blurBytes );
+    // 2 iterations of box blur → approximate Gaussian.
+    HorizontalBoxBlur( bgraPixels, m_blurredFrame.data(), width, height, effectiveRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, effectiveRadius );
+    HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), width, height, effectiveRadius );
+    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, effectiveRadius );
 
-    // Downscale (or copy) source frame to blur working size.
-    if( blurW == width && blurH == height )
-    {
-        memcpy( m_smallFrame.data(), bgraPixels, blurBytes );
-    }
-    else
-    {
-        for( uint32_t y = 0; y < blurH; y++ )
-        {
-            uint32_t srcY = y * height / blurH;
-            for( uint32_t x = 0; x < blurW; x++ )
-            {
-                uint32_t srcX = x * width / blurW;
-                size_t si = ( static_cast<size_t>( srcY ) * width + srcX ) * 4;
-                size_t di = ( static_cast<size_t>( y ) * blurW + x ) * 4;
-                m_smallFrame[di + 0] = bgraPixels[si + 0];
-                m_smallFrame[di + 1] = bgraPixels[si + 1];
-                m_smallFrame[di + 2] = bgraPixels[si + 2];
-                m_smallFrame[di + 3] = 0xFF;
-            }
-        }
-    }
-
-    // Scale blur radius proportionally.
-    int scaledRadius = (std::max)( 1, static_cast<int>( blurRadius * blurW / width ) );
-
-    // 2 passes of box blur → approximate Gaussian.
-    HorizontalBoxBlur( m_smallFrame.data(), m_blurredFrame.data(), blurW, blurH, scaledRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), blurW, blurH, scaledRadius );
-    HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), blurW, blurH, scaledRadius );
-    VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), blurW, blurH, scaledRadius );
-
-    // Blend: output = mask * original + (1 - mask) * blurred.
-    // Upscale blurred pixels on-the-fly during blending (nearest-neighbor).
+    // Single blend pass.  With a binary mask (0 or 1), almost all pixels
+    // hit the fast paths — no multiply/divide needed.
+    const uint8_t* blurData = m_tempFrame.data();
     for( uint32_t y = 0; y < height; y++ )
     {
-        uint32_t blurY = y * blurH / height;
+        uint8_t* dstRow = bgraPixels + static_cast<size_t>( y ) * width * 4;
+        const uint8_t* blurRow = blurData + static_cast<size_t>( y ) * width * 4;
+        const float* maskRow = m_mask.data() + static_cast<size_t>( y ) * width;
+
         for( uint32_t x = 0; x < width; x++ )
         {
-            size_t idx = static_cast<size_t>( y ) * width + x;
-            uint32_t alpha = static_cast<uint32_t>( m_mask[idx] * 255.0f + 0.5f );
-            if( alpha > 255 ) alpha = 255;
-            uint32_t invAlpha = 255 - alpha;
+            float maskVal = maskRow[x];
 
-            uint32_t blurX = x * blurW / width;
-            size_t bpx = ( static_cast<size_t>( blurY ) * blurW + blurX ) * 4;
-            size_t px = idx * 4;
-            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + m_tempFrame[bpx + 0] * invAlpha ) / 255 );
-            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + m_tempFrame[bpx + 1] * invAlpha ) / 255 );
-            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + m_tempFrame[bpx + 2] * invAlpha ) / 255 );
+            // Fast path: person → keep original pixel untouched.
+            if( maskVal >= 0.5f )
+                continue;
+
+            // Fast path: background → copy blurred pixel.
+            uint8_t* dp = dstRow + x * 4;
+            const uint8_t* bp = blurRow + x * 4;
+            *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
         }
     }
 }
@@ -579,17 +530,19 @@ void BackgroundBlur::ApplyImageWithMask( uint8_t* bgraPixels, uint32_t width, ui
 
     for( uint32_t y = 0; y < height; y++ )
     {
+        uint8_t* dstRow = bgraPixels + static_cast<size_t>( y ) * width * 4;
+        const uint8_t* bgRow = bgData + static_cast<size_t>( y ) * width * 4;
+        const float* maskRow = m_mask.data() + static_cast<size_t>( y ) * width;
+
         for( uint32_t x = 0; x < width; x++ )
         {
-            size_t idx = static_cast<size_t>( y ) * width + x;
-            uint32_t alpha = static_cast<uint32_t>( m_mask[idx] * 255.0f + 0.5f );
-            if( alpha > 255 ) alpha = 255;
-            uint32_t invAlpha = 255 - alpha;
+            // Binary mask: person stays, background gets replaced.
+            if( maskRow[x] >= 0.5f )
+                continue;
 
-            size_t px = idx * 4;
-            bgraPixels[px + 0] = static_cast<uint8_t>( ( bgraPixels[px + 0] * alpha + bgData[px + 0] * invAlpha ) / 255 );
-            bgraPixels[px + 1] = static_cast<uint8_t>( ( bgraPixels[px + 1] * alpha + bgData[px + 1] * invAlpha ) / 255 );
-            bgraPixels[px + 2] = static_cast<uint8_t>( ( bgraPixels[px + 2] * alpha + bgData[px + 2] * invAlpha ) / 255 );
+            uint8_t* dp = dstRow + x * 4;
+            const uint8_t* bp = bgRow + x * 4;
+            *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
         }
     }
 }
@@ -609,9 +562,9 @@ bool BackgroundBlur::ApplyImageReplacement( uint8_t* bgraPixels, uint32_t width,
 
     // Run inference less often for large frames to keep framerate smooth.
     // Small overlay (~320×240 = 77K px) → every 3 frames.
-    // Full-screen (~1920×1080 = 2M px) → every 5 frames.
+    // Full-screen (~1920×1080 = 2M px) → every 6 frames.
     const uint32_t pixels = width * height;
-    const int inferenceInterval = ( pixels > 500000 ) ? 5 : 3;
+    const int inferenceInterval = ( pixels > 500000 ) ? 6 : 3;
 
     bool needInference = !m_hasCachedMask
         || m_lastMaskWidth != width
@@ -642,12 +595,11 @@ bool BackgroundBlur::Apply( uint8_t* bgraPixels, uint32_t width, uint32_t height
     if( !m_session || !bgraPixels || width == 0 || height == 0 )
         return false;
 
-    // Only run the expensive ONNX inference every N frames.
-    // Reuse the cached mask for intermediate frames — the person
-    // doesn't move much between frames at 30fps.
-    // Increase interval for large frames to keep framerate smooth.
+    // Run inference less often for large frames to keep framerate smooth.
+    // Small overlay (~320×240 = 77K px) → every 3 frames.
+    // Full-screen (~1920×1080 = 2M px) → every 6 frames.
     const uint32_t pixels = width * height;
-    const int inferenceInterval = ( pixels > 500000 ) ? 5 : 3;
+    const int inferenceInterval = ( pixels > 500000 ) ? 6 : 3;
 
     bool needInference = !m_hasCachedMask
         || m_lastMaskWidth != width

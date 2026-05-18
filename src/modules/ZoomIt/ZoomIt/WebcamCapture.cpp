@@ -502,11 +502,27 @@ void WebcamCapture::CaptureThread()
         const UINT ovH = m_overlayH;
         if( ovW > 0 && ovH > 0 )
         {
-            // Pre-scale camera frame to overlay dimensions (CPU only).
+            // Cap the CPU processing resolution to avoid doing blur,
+            // blending, and shape masking at full 1080p.  The GPU
+            // composite stretches the smaller texture to fill the
+            // destination rect, so there is no visual size mismatch.
+            // 960×540 is 1/4 the pixels of 1080p and still looks good.
+            constexpr UINT kMaxProcDim = 960;
+            UINT procW = ovW;
+            UINT procH = ovH;
+            if( procW > kMaxProcDim || procH > kMaxProcDim )
+            {
+                float scale = static_cast<float>( kMaxProcDim ) /
+                              static_cast<float>( max( procW, procH ) );
+                procW = max( 1u, static_cast<UINT>( ovW * scale ) );
+                procH = max( 1u, static_cast<UINT>( ovH * scale ) );
+            }
+
+            // Pre-scale camera frame to processing dimensions (CPU only).
             // NO D3D calls here — the capture thread must not touch the
             // recording session's D3D device to avoid GPU contention.
-            const UINT scaledStride = ovW * 4;
-            const size_t scaledSize = static_cast<size_t>( scaledStride ) * ovH;
+            const UINT scaledStride = procW * 4;
+            const size_t scaledSize = static_cast<size_t>( scaledStride ) * procH;
             m_scaledPixels.resize( scaledSize );
 
             const UINT32* srcPixels = reinterpret_cast<const UINT32*>( m_framePixels.data() );
@@ -519,12 +535,12 @@ void WebcamCapture::CaptureThread()
             UINT srcCropX = 0, srcCropY = 0;
             UINT srcCropW = m_camWidth, srcCropH = m_camHeight;
 
-            if( (m_size == FullScreen || m_shape == Circle || m_shape == RoundedSquare) && !m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 && ovW > 0 && ovH > 0 )
+            if( (m_size == FullScreen || m_shape == Circle || m_shape == RoundedSquare) && !m_fullScreenRecording && m_camWidth > 0 && m_camHeight > 0 && procW > 0 && procH > 0 )
             {
                 // Compare aspect ratios: camera vs output.
                 // Scale camera so it fills the output, then crop excess.
                 double camAspect = static_cast<double>( m_camWidth ) / m_camHeight;
-                double outAspect = static_cast<double>( ovW ) / ovH;
+                double outAspect = static_cast<double>( procW ) / procH;
 
                 if( camAspect > outAspect )
                 {
@@ -543,53 +559,52 @@ void WebcamCapture::CaptureThread()
             }
 
             // Pre-compute shape mask parameters.
-            const float halfW = ovW * 0.5f;
-            const float halfH = ovH * 0.5f;
+            const float halfW = procW * 0.5f;
+            const float halfH = procH * 0.5f;
             // Rounded-rect corner radius: 10% of the smaller dimension.
             // Rounded-square corner radius: 40% for exaggerated rounding.
             const float cornerRadius = min( halfW, halfH ) *
                 ( m_shape == RoundedSquare ? 0.40f : 0.10f );
 
-            for( UINT y = 0; y < ovH; y++ )
+            for( UINT y = 0; y < procH; y++ )
             {
-                const UINT srcY = srcCropY + y * srcCropH / ovH;
+                const UINT srcY = srcCropY + y * srcCropH / procH;
                 const UINT32* srcRow = srcPixels + static_cast<size_t>( srcY ) * srcW32;
-                UINT32* dstRow = dstPixels + static_cast<size_t>( y ) * ovW;
+                UINT32* dstRow = dstPixels + static_cast<size_t>( y ) * procW;
 
-                for( UINT x = 0; x < ovW; x++ )
+                for( UINT x = 0; x < procW; x++ )
                 {
-                    const UINT srcX = srcCropX + x * srcCropW / ovW;
+                    const UINT srcX = srcCropX + x * srcCropW / procW;
                     UINT32 pixel = srcRow[srcX];
                     dstRow[x] = pixel | 0xFF000000u;
                 }
             }
 
-            // Apply background processing on the scaled overlay-sized frame.
-            // This is much faster than processing the full camera frame
-            // (e.g. 300x300 vs 1920x1080 = ~23x fewer pixels).
+            // Apply background processing at the capped processing
+            // resolution — dramatically faster than full output size.
             if( m_backgroundBlur && m_backgroundBlur->IsInitialized() )
             {
                 if( m_backgroundMode == WebcamBackgroundMode::Image && m_backgroundBlur->HasBackgroundImage() )
                 {
                     m_backgroundBlur->ApplyImageReplacement(
                         reinterpret_cast<uint8_t*>( m_scaledPixels.data() ),
-                        ovW, ovH );
+                        procW, procH );
                 }
                 else
                 {
                     m_backgroundBlur->Apply(
                         reinterpret_cast<uint8_t*>( m_scaledPixels.data() ),
-                        ovW, ovH, 7 );
+                        procW, procH, 21 );
                 }
             }
 
             // Apply shape mask (set pixels outside the shape to transparent).
             // Skip entirely for Square — all pixels are inside.
             if( m_shape != Square )
-            for( UINT y = 0; y < ovH; y++ )
+            for( UINT y = 0; y < procH; y++ )
             {
-                UINT32* dstRow2 = dstPixels + static_cast<size_t>( y ) * ovW;
-                for( UINT x = 0; x < ovW; x++ )
+                UINT32* dstRow2 = dstPixels + static_cast<size_t>( y ) * procW;
+                for( UINT x = 0; x < procW; x++ )
                 {
                     bool inside = true;
                     if( m_shape == Circle )
@@ -613,17 +628,17 @@ void WebcamCapture::CaptureThread()
                         {
                             cx = cornerRadius; cy = cornerRadius; inCorner = true;
                         }
-                        else if( px > ovW - cornerRadius && py < cornerRadius )
+                        else if( px > procW - cornerRadius && py < cornerRadius )
                         {
-                            cx = ovW - cornerRadius; cy = cornerRadius; inCorner = true;
+                            cx = procW - cornerRadius; cy = cornerRadius; inCorner = true;
                         }
-                        else if( px < cornerRadius && py > ovH - cornerRadius )
+                        else if( px < cornerRadius && py > procH - cornerRadius )
                         {
-                            cx = cornerRadius; cy = ovH - cornerRadius; inCorner = true;
+                            cx = cornerRadius; cy = procH - cornerRadius; inCorner = true;
                         }
-                        else if( px > ovW - cornerRadius && py > ovH - cornerRadius )
+                        else if( px > procW - cornerRadius && py > procH - cornerRadius )
                         {
-                            cx = ovW - cornerRadius; cy = ovH - cornerRadius; inCorner = true;
+                            cx = procW - cornerRadius; cy = procH - cornerRadius; inCorner = true;
                         }
                         if( inCorner )
                         {
@@ -639,6 +654,32 @@ void WebcamCapture::CaptureThread()
                 }
             }
 
+            // If we processed at a lower resolution than the overlay
+            // destination, upscale using nearest-neighbor before upload.
+            // This is a cheap memory copy (~8MB/frame) compared to the
+            // blur/blend work we avoided at full resolution.
+            UINT finalW = procW;
+            UINT finalH = procH;
+            if( procW < ovW || procH < ovH )
+            {
+                const size_t fullSize = static_cast<size_t>( ovW ) * ovH * 4;
+                m_upscalePixels.resize( fullSize );
+                UINT32* dst = reinterpret_cast<UINT32*>( m_upscalePixels.data() );
+                const UINT32* src = reinterpret_cast<const UINT32*>( m_scaledPixels.data() );
+                for( UINT y = 0; y < ovH; y++ )
+                {
+                    UINT srcY = y * procH / ovH;
+                    const UINT32* srcRow = src + static_cast<size_t>( srcY ) * procW;
+                    UINT32* dstRow = dst + static_cast<size_t>( y ) * ovW;
+                    for( UINT x = 0; x < ovW; x++ )
+                    {
+                        dstRow[x] = srcRow[x * procW / ovW];
+                    }
+                }
+                finalW = ovW;
+                finalH = ovH;
+            }
+
             {
                 std::lock_guard<std::mutex> lock( m_frameLock );
 
@@ -649,9 +690,12 @@ void WebcamCapture::CaptureThread()
                 totalScaleMs += scaleMs;
 #endif
 
-                m_pendingPixels.swap( m_scaledPixels );
-                m_pendingW = ovW;
-                m_pendingH = ovH;
+                if( finalW == ovW && finalH == ovH && !m_upscalePixels.empty() && procW < ovW )
+                    m_pendingPixels.swap( m_upscalePixels );
+                else
+                    m_pendingPixels.swap( m_scaledPixels );
+                m_pendingW = finalW;
+                m_pendingH = finalH;
                 m_newFrameReady = true;
                 frameCount++;
 
@@ -666,10 +710,10 @@ void WebcamCapture::CaptureThread()
 
                 if( frameCount <= 5 || ( frameCount % 30 ) == 0 )
                 {
-                    OutputDebug( L"[WebcamCapture] frame %d: cam=%ux%u overlay=%ux%u "
+                    OutputDebug( L"[WebcamCapture] frame %d: cam=%ux%u proc=%ux%u overlay=%ux%u "
                                 L"read=%.1fms copy=%.1fms scale=%.1fms lock=%.1fms "
                                 L"interval=%.1fms avgRead=%.1f avgCopy=%.1f avgScale=%.1f\n",
-                                 frameCount, m_camWidth, m_camHeight, ovW, ovH,
+                                 frameCount, m_camWidth, m_camHeight, procW, procH, ovW, ovH,
                                  readMs, copyMs, scaleMs, lockMs, frameIntervalMs,
                                  totalReadMs / frameCount, totalCopyMs / frameCount,
                                  totalScaleMs / frameCount );

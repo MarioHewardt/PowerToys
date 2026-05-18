@@ -91,7 +91,6 @@ private:
     std::vector<float>      m_outputBuf;        // Raw copy of output tensor data
     std::vector<float>      m_mask;             // Segmentation mask [width*height]
     std::vector<float>      m_erodeBuf;         // Model-resolution mask buffer
-    std::vector<uint8_t>    m_smallFrame;       // Downscaled frame for blur
     std::vector<uint8_t>    m_blurredFrame;     // Temporary blurred copy
     std::vector<uint8_t>    m_tempFrame;        // Second temp buffer for blur passes
 

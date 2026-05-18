@@ -141,6 +141,7 @@ private:
     // Reusable frame buffer for the capture thread (avoids per-frame alloc).
     std::vector<BYTE>                   m_framePixels;
     std::vector<BYTE>                   m_scaledPixels;
+    std::vector<BYTE>                   m_upscalePixels;
 
     UINT                                m_overlayW = 0;
     UINT                                m_overlayH = 0;
