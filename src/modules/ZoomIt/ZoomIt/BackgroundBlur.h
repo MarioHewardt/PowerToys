@@ -72,6 +72,9 @@ private:
     // Scale the loaded background image to the given dimensions (cached).
     void EnsureScaledBgImage( uint32_t width, uint32_t height );
 
+    // Decide whether inference is needed this frame (periodic + motion-adaptive).
+    bool ShouldRunInference( const uint8_t* bgraPixels, uint32_t width, uint32_t height );
+
     // Windows ML objects.
     winrt::Windows::AI::MachineLearning::LearningModel          m_model{ nullptr };
     winrt::Windows::AI::MachineLearning::LearningModelSession   m_session{ nullptr };
@@ -91,6 +94,7 @@ private:
     std::vector<float>      m_outputBuf;        // Raw copy of output tensor data
     std::vector<float>      m_mask;             // Segmentation mask [width*height]
     std::vector<float>      m_erodeBuf;         // Model-resolution mask buffer
+    std::vector<float>      m_maskBlurBuf;      // Temp buffer for mask edge smoothing
     std::vector<uint8_t>    m_blurredFrame;     // Temporary blurred copy
     std::vector<uint8_t>    m_tempFrame;        // Second temp buffer for blur passes
 
@@ -109,4 +113,9 @@ private:
     uint32_t                m_lastMaskWidth = 0;
     uint32_t                m_lastMaskHeight = 0;
     bool                    m_hasCachedMask = false;
+
+    // Motion detection: luminance samples from the previous frame.
+    static constexpr int    MOTION_GRID_SIZE = 8; // 8×8 = 64 sample points
+    float                   m_prevSamples[MOTION_GRID_SIZE * MOTION_GRID_SIZE] = {};
+    bool                    m_hasPrevSamples = false;
 };

@@ -243,15 +243,81 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
             }
         }
 
-        // Upscale processed mask to frame dimensions via nearest-neighbor.
-        m_mask.resize( static_cast<size_t>( width ) * height );
+        // Upscale processed mask to frame dimensions via bilinear interpolation
+        // to produce smooth edges instead of staircase artifacts.
+        const size_t maskPixels = static_cast<size_t>( width ) * height;
+        m_mask.resize( maskPixels );
         for( uint32_t y = 0; y < height; y++ )
         {
-            int64_t srcY = static_cast<int64_t>( y ) * outH / height;
+            float srcYf = ( y + 0.5f ) * outH / static_cast<float>( height ) - 0.5f;
+            srcYf = (std::max)( 0.0f, (std::min)( srcYf, static_cast<float>( outH - 1 ) ) );
+            int64_t y0 = static_cast<int64_t>( srcYf );
+            int64_t y1 = (std::min)( y0 + 1, outH - 1 );
+            float fy = srcYf - y0;
+
             for( uint32_t x = 0; x < width; x++ )
             {
-                int64_t srcX = static_cast<int64_t>( x ) * outW / width;
-                m_mask[static_cast<size_t>( y ) * width + x] = m_erodeBuf[srcY * outW + srcX];
+                float srcXf = ( x + 0.5f ) * outW / static_cast<float>( width ) - 0.5f;
+                srcXf = (std::max)( 0.0f, (std::min)( srcXf, static_cast<float>( outW - 1 ) ) );
+                int64_t x0 = static_cast<int64_t>( srcXf );
+                int64_t x1 = (std::min)( x0 + 1, outW - 1 );
+                float fx = srcXf - x0;
+
+                float v00 = m_erodeBuf[y0 * outW + x0];
+                float v01 = m_erodeBuf[y0 * outW + x1];
+                float v10 = m_erodeBuf[y1 * outW + x0];
+                float v11 = m_erodeBuf[y1 * outW + x1];
+
+                m_mask[static_cast<size_t>( y ) * width + x] =
+                    v00 * ( 1.0f - fx ) * ( 1.0f - fy ) +
+                    v01 * fx * ( 1.0f - fy ) +
+                    v10 * ( 1.0f - fx ) * fy +
+                    v11 * fx * fy;
+            }
+        }
+
+        // Apply a small box blur to the upscaled mask to feather edges.
+        const int maskBlurRadius = 3;
+        const int maskDiam = maskBlurRadius * 2 + 1;
+        m_maskBlurBuf.resize( maskPixels );
+
+        // Horizontal pass.
+        for( uint32_t y = 0; y < height; y++ )
+        {
+            const float* srcRow = m_mask.data() + static_cast<size_t>( y ) * width;
+            float* dstRow = m_maskBlurBuf.data() + static_cast<size_t>( y ) * width;
+            float sum = 0.0f;
+
+            for( int i = -maskBlurRadius; i <= maskBlurRadius; i++ )
+                sum += srcRow[(std::max)( 0, (std::min)( static_cast<int>( width ) - 1, i ) )];
+
+            for( uint32_t x = 0; x < width; x++ )
+            {
+                dstRow[x] = sum / maskDiam;
+                int remX = (std::max)( 0, static_cast<int>( x ) - maskBlurRadius );
+                int addX = (std::min)( static_cast<int>( width ) - 1, static_cast<int>( x ) + maskBlurRadius + 1 );
+                sum += srcRow[addX] - srcRow[remX];
+            }
+        }
+
+        // Vertical pass.
+        for( uint32_t x = 0; x < width; x++ )
+        {
+            float sum = 0.0f;
+
+            for( int i = -maskBlurRadius; i <= maskBlurRadius; i++ )
+            {
+                int iy = (std::max)( 0, (std::min)( static_cast<int>( height ) - 1, i ) );
+                sum += m_maskBlurBuf[static_cast<size_t>( iy ) * width + x];
+            }
+
+            for( uint32_t y = 0; y < height; y++ )
+            {
+                m_mask[static_cast<size_t>( y ) * width + x] = sum / maskDiam;
+                int remY = (std::max)( 0, static_cast<int>( y ) - maskBlurRadius );
+                int addY = (std::min)( static_cast<int>( height ) - 1, static_cast<int>( y ) + maskBlurRadius + 1 );
+                sum += m_maskBlurBuf[static_cast<size_t>( addY ) * width + x] -
+                       m_maskBlurBuf[static_cast<size_t>( remY ) * width + x];
             }
         }
 
@@ -368,8 +434,7 @@ void BackgroundBlur::ApplyBlurWithMask( uint8_t* bgraPixels, uint32_t width, uin
     HorizontalBoxBlur( m_tempFrame.data(), m_blurredFrame.data(), width, height, effectiveRadius );
     VerticalBoxBlur( m_blurredFrame.data(), m_tempFrame.data(), width, height, effectiveRadius );
 
-    // Single blend pass.  With a binary mask (0 or 1), almost all pixels
-    // hit the fast paths — no multiply/divide needed.
+    // Blend pass with alpha support for smooth mask edges.
     const uint8_t* blurData = m_tempFrame.data();
     for( uint32_t y = 0; y < height; y++ )
     {
@@ -381,14 +446,25 @@ void BackgroundBlur::ApplyBlurWithMask( uint8_t* bgraPixels, uint32_t width, uin
         {
             float maskVal = maskRow[x];
 
-            // Fast path: person → keep original pixel untouched.
-            if( maskVal >= 0.5f )
+            // Fast path: fully person → keep original pixel untouched.
+            if( maskVal >= 1.0f )
                 continue;
 
-            // Fast path: background → copy blurred pixel.
             uint8_t* dp = dstRow + x * 4;
             const uint8_t* bp = blurRow + x * 4;
-            *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
+
+            // Fast path: fully background → copy blurred pixel.
+            if( maskVal <= 0.0f )
+            {
+                *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
+                continue;
+            }
+
+            // Edge pixel → alpha blend original and blurred.
+            float inv = 1.0f - maskVal;
+            dp[0] = static_cast<uint8_t>( dp[0] * maskVal + bp[0] * inv + 0.5f );
+            dp[1] = static_cast<uint8_t>( dp[1] * maskVal + bp[1] * inv + 0.5f );
+            dp[2] = static_cast<uint8_t>( dp[2] * maskVal + bp[2] * inv + 0.5f );
         }
     }
 }
@@ -536,15 +612,85 @@ void BackgroundBlur::ApplyImageWithMask( uint8_t* bgraPixels, uint32_t width, ui
 
         for( uint32_t x = 0; x < width; x++ )
         {
-            // Binary mask: person stays, background gets replaced.
-            if( maskRow[x] >= 0.5f )
+            float maskVal = maskRow[x];
+
+            // Fully person → keep original pixel.
+            if( maskVal >= 1.0f )
                 continue;
 
             uint8_t* dp = dstRow + x * 4;
             const uint8_t* bp = bgRow + x * 4;
-            *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
+
+            // Fully background → copy background image pixel.
+            if( maskVal <= 0.0f )
+            {
+                *reinterpret_cast<uint32_t*>( dp ) = *reinterpret_cast<const uint32_t*>( bp );
+                continue;
+            }
+
+            // Edge pixel → alpha blend person and background image.
+            float inv = 1.0f - maskVal;
+            dp[0] = static_cast<uint8_t>( dp[0] * maskVal + bp[0] * inv + 0.5f );
+            dp[1] = static_cast<uint8_t>( dp[1] * maskVal + bp[1] * inv + 0.5f );
+            dp[2] = static_cast<uint8_t>( dp[2] * maskVal + bp[2] * inv + 0.5f );
         }
     }
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::ShouldRunInference
+//
+// Decides whether segmentation inference should run this frame.
+// Uses a combination of periodic fallback and motion detection:
+// motion is estimated by comparing luminance at a sparse grid of
+// sample points with the previous frame.  When the scene changes
+// quickly (fast head movement), inference runs every frame.
+//----------------------------------------------------------------------------
+bool BackgroundBlur::ShouldRunInference( const uint8_t* bgraPixels, uint32_t width, uint32_t height )
+{
+    // Always run if no cached mask or dimensions changed.
+    if( !m_hasCachedMask || m_lastMaskWidth != width || m_lastMaskHeight != height )
+        return true;
+
+    // Periodic fallback: run at least every N frames.
+    const uint32_t pixels = width * height;
+    const int inferenceInterval = ( pixels > 500000 ) ? 6 : 3;
+    if( ( m_frameCounter % inferenceInterval ) == 0 )
+        return true;
+
+    // Motion detection: sample luminance at a sparse grid and compare
+    // with the previous frame.
+    constexpr int gridSize = MOTION_GRID_SIZE;
+    constexpr int numSamples = gridSize * gridSize;
+    float curSamples[numSamples];
+
+    for( int gy = 0; gy < gridSize; gy++ )
+    {
+        uint32_t sy = ( gy * 2 + 1 ) * height / ( gridSize * 2 );
+        for( int gx = 0; gx < gridSize; gx++ )
+        {
+            uint32_t sx = ( gx * 2 + 1 ) * width / ( gridSize * 2 );
+            const uint8_t* px = bgraPixels + ( static_cast<size_t>( sy ) * width + sx ) * 4;
+            curSamples[gy * gridSize + gx] = 0.299f * px[2] + 0.587f * px[1] + 0.114f * px[0];
+        }
+    }
+
+    float motionScore = 0.0f;
+    if( m_hasPrevSamples )
+    {
+        for( int i = 0; i < numSamples; i++ )
+        {
+            float diff = curSamples[i] - m_prevSamples[i];
+            motionScore += diff > 0.0f ? diff : -diff;
+        }
+        motionScore /= numSamples;
+    }
+
+    memcpy( m_prevSamples, curSamples, sizeof( curSamples ) );
+    m_hasPrevSamples = true;
+
+    // Average per-sample luminance change > 5/255 indicates significant motion.
+    return motionScore > 5.0f;
 }
 
 //----------------------------------------------------------------------------
@@ -560,18 +706,7 @@ bool BackgroundBlur::ApplyImageReplacement( uint8_t* bgraPixels, uint32_t width,
     if( m_bgImage.empty() )
         return false;
 
-    // Run inference less often for large frames to keep framerate smooth.
-    // Small overlay (~320×240 = 77K px) → every 3 frames.
-    // Full-screen (~1920×1080 = 2M px) → every 6 frames.
-    const uint32_t pixels = width * height;
-    const int inferenceInterval = ( pixels > 500000 ) ? 6 : 3;
-
-    bool needInference = !m_hasCachedMask
-        || m_lastMaskWidth != width
-        || m_lastMaskHeight != height
-        || ( m_frameCounter % inferenceInterval ) == 0;
-
-    if( needInference )
+    if( ShouldRunInference( bgraPixels, width, height ) )
     {
         if( !RunSegmentation( bgraPixels, width, height ) )
             return false;
@@ -595,18 +730,7 @@ bool BackgroundBlur::Apply( uint8_t* bgraPixels, uint32_t width, uint32_t height
     if( !m_session || !bgraPixels || width == 0 || height == 0 )
         return false;
 
-    // Run inference less often for large frames to keep framerate smooth.
-    // Small overlay (~320×240 = 77K px) → every 3 frames.
-    // Full-screen (~1920×1080 = 2M px) → every 6 frames.
-    const uint32_t pixels = width * height;
-    const int inferenceInterval = ( pixels > 500000 ) ? 6 : 3;
-
-    bool needInference = !m_hasCachedMask
-        || m_lastMaskWidth != width
-        || m_lastMaskHeight != height
-        || ( m_frameCounter % inferenceInterval ) == 0;
-
-    if( needInference )
+    if( ShouldRunInference( bgraPixels, width, height ) )
     {
         if( !RunSegmentation( bgraPixels, width, height ) )
             return false;
