@@ -55,6 +55,7 @@ DWORD	g_RecordScalingMP4 = 100;
 RecordingFormat g_RecordingFormat = RecordingFormat::MP4;
 BOOLEAN g_CaptureSystemAudio = TRUE;
 BOOLEAN g_CaptureAudio = FALSE;
+BOOLEAN g_NoiseCancellation = TRUE;
 TCHAR	g_MicrophoneDeviceId[MAX_PATH] = {0};
 BOOLEAN g_WebcamOverlay = FALSE;
 DWORD   g_WebcamPosition = 3; // 0=TL, 1=TR, 2=BL, 3=BR
@@ -117,6 +118,7 @@ REG_SETTING RegSettings[] = {
     { L"CaptureAudio", SETTING_TYPE_BOOLEAN, 0, &g_CaptureAudio, static_cast<DOUBLE>(g_CaptureAudio) },
     { L"CaptureSystemAudio", SETTING_TYPE_BOOLEAN, 0, &g_CaptureSystemAudio, static_cast<DOUBLE>(g_CaptureSystemAudio) },
     { L"MicrophoneDeviceId", SETTING_TYPE_STRING, sizeof(g_MicrophoneDeviceId), g_MicrophoneDeviceId, static_cast<DOUBLE>(0) },
+    { L"NoiseCancellation", SETTING_TYPE_BOOLEAN, 0, &g_NoiseCancellation, static_cast<DOUBLE>(g_NoiseCancellation) },
     { L"WebcamOverlay", SETTING_TYPE_BOOLEAN, 0, &g_WebcamOverlay, static_cast<DOUBLE>(g_WebcamOverlay) },
     { L"WebcamPosition", SETTING_TYPE_DWORD, 0, &g_WebcamPosition, static_cast<DOUBLE>(g_WebcamPosition) },
     { L"WebcamSize", SETTING_TYPE_DWORD, 0, &g_WebcamSize, static_cast<DOUBLE>(g_WebcamSize) },

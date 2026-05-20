@@ -1,18 +1,19 @@
 #pragma once
 
 #include "LoopbackCapture.h"
+#include "NoiseSuppressor.h"
 
 class AudioSampleGenerator
 {
 public:
-    AudioSampleGenerator(bool captureMicrophone = true, bool captureSystemAudio = true);
+    AudioSampleGenerator(bool captureMicrophone = true, bool captureSystemAudio = true, bool noiseCancellation = false);
     ~AudioSampleGenerator();
 
     winrt::Windows::Foundation::IAsyncAction InitializeAsync();
     winrt::Windows::Media::MediaProperties::AudioEncodingProperties GetEncodingProperties();
 
     std::optional<winrt::Windows::Media::Core::MediaStreamSample> TryGetNextSample();
-    void Start();
+    void Start(int64_t videoStartTimestamp = 0);
     void Stop();
 
 private:
@@ -70,4 +71,13 @@ private:
     std::atomic<bool> m_started = false;
     bool m_captureMicrophone = true;
     bool m_captureSystemAudio = true;
+    bool m_noiseCancellation = false;
+    std::unique_ptr<NoiseSuppressor> m_noiseSuppressor;
+
+    // Timestamp rebasing: audio RelativeTime → video SystemRelativeTime domain.
+    // Without this, the transcoder sees audio timestamps (~350ms) far below video
+    // timestamps (~111 billion ticks) and starves video while trying to fill the gap.
+    int64_t m_videoStartTimestamp = 0;
+    int64_t m_timestampOffset = 0;
+    bool m_hasTimestampOffset = false;
 };

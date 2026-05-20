@@ -3225,6 +3225,7 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                 // Enable/disable audio controls based on selection (GIF has no audio)
                 EnableWindow(GetDlgItem(hDlg, IDC_CAPTURE_SYSTEM_AUDIO), !isGifSelected);
                 EnableWindow(GetDlgItem(hDlg, IDC_CAPTURE_AUDIO), !isGifSelected);
+                EnableWindow(GetDlgItem(hDlg, IDC_NOISE_CANCELLATION), !isGifSelected && IsDlgButtonChecked(hDlg, IDC_CAPTURE_AUDIO) == BST_CHECKED);
                 EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE_LABEL), !isGifSelected);
                 EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE), !isGifSelected);
 
@@ -3236,6 +3237,10 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
         if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == IDC_WEBCAM_OVERLAY) {
             bool webcamEnabled = IsDlgButtonChecked(hDlg, IDC_WEBCAM_OVERLAY) == BST_CHECKED;
             EnableWindow(GetDlgItem(hDlg, IDC_WEBCAM_SETTINGS), webcamEnabled);
+        }
+        if (HIWORD(wParam) == BN_CLICKED && LOWORD(wParam) == IDC_CAPTURE_AUDIO) {
+            bool micEnabled = IsDlgButtonChecked(hDlg, IDC_CAPTURE_AUDIO) == BST_CHECKED;
+            EnableWindow(GetDlgItem(hDlg, IDC_NOISE_CANCELLATION), micEnabled);
         }
 
         switch ( LOWORD( wParam )) {
@@ -5063,6 +5068,9 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO,
             g_CaptureAudio ? BST_CHECKED: BST_UNCHECKED );
 
+        CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_NOISE_CANCELLATION,
+            g_NoiseCancellation ? BST_CHECKED: BST_UNCHECKED );
+
         CheckDlgButton( g_OptionsTabs[RECORD_PAGE].hPage, IDC_RECORD_ASPECT_RATIO,
             g_RecordAspectRatio ? BST_CHECKED: BST_UNCHECKED );
 
@@ -5138,6 +5146,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         bool isGifSelected = (g_RecordingFormat == RecordingFormat::GIF);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_SYSTEM_AUDIO), !isGifSelected);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO), !isGifSelected);
+        EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_NOISE_CANCELLATION), !isGifSelected && g_CaptureAudio);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE_LABEL), !isGifSelected);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE), !isGifSelected);
 
@@ -5501,6 +5510,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             g_BreakLockWorkstation = IsDlgButtonChecked( g_OptionsTabs[BREAK_PAGE].hPage, IDC_CHECK_LOCK_WORKSTATION ) == BST_CHECKED;
             g_CaptureSystemAudio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_SYSTEM_AUDIO) == BST_CHECKED;
             g_CaptureAudio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO) == BST_CHECKED;
+            g_NoiseCancellation = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_NOISE_CANCELLATION) == BST_CHECKED;
             g_RecordAspectRatio = IsDlgButtonChecked(g_OptionsTabs[RECORD_PAGE].hPage, IDC_RECORD_ASPECT_RATIO) == BST_CHECKED;
             GetDlgItemText( g_OptionsTabs[BREAK_PAGE].hPage, IDC_TIMER, text, 3 );
             text[2] = 0;
@@ -6811,6 +6821,22 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
     // Capture the UI thread context so we can resume on it for the save dialog
     winrt::apartment_context uiThread;
 
+    // Start audio initialization as early as possible.  AudioGraph creation
+    // and microphone device opening take ~1400 ms.  By starting here, the
+    // init runs in the background during D3D device creation, capture-item
+    // creation, file I/O, and the entire VideoRecordingSession constructor
+    // (webcam probe + warmup), giving it ~1400 ms of overlap — enough to
+    // finish before StartAsync even needs the result.
+    std::unique_ptr<AudioSampleGenerator> audioGenerator;
+    winrt::Windows::Foundation::IAsyncAction audioInitAction{ nullptr };
+    if( g_RecordingFormat != RecordingFormat::GIF )
+    {
+        audioGenerator = std::make_unique<AudioSampleGenerator>(
+            g_CaptureAudio, g_CaptureSystemAudio, g_NoiseCancellation );
+        audioInitAction = audioGenerator->InitializeAsync();
+        _diagLog( L"audio InitializeAsync started (background)" );
+    }
+
     auto tempFolderPath = std::filesystem::temp_directory_path().wstring();
     auto tempFolder = co_await winrt::StorageFolder::GetFolderFromPathAsync( tempFolderPath );
     auto appFolder = co_await tempFolder.CreateFolderAsync( L"ZoomIt", winrt::CreationCollisionOption::OpenIfExists );
@@ -6899,8 +6925,8 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
                                         item,
                                         *rcCrop,
                                         g_RecordFrameRate,
-                                        g_CaptureAudio,
-                                        g_CaptureSystemAudio,
+                                        std::move(audioGenerator),
+                                        audioInitAction,
                                         stream );
         _diagLog( L"VideoRecordingSession::Create returned" );
 
