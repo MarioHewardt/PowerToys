@@ -63,7 +63,8 @@ public:
         Shape shape,
         bool fullScreenRecording = false,
         WebcamBackgroundMode backgroundMode = WebcamBackgroundMode::None,
-        const wchar_t* backgroundImagePath = nullptr );
+        const wchar_t* backgroundImagePath = nullptr,
+        int brightness = 50 );
     ~WebcamCapture();
 
     // Start/stop the capture thread.
@@ -169,10 +170,10 @@ private:
     UINT                                m_camHeight = 0;
     RECT                                m_destRect = {};
 
-    // Adaptive brightness correction.
-    double                              m_currentGamma = 1.0;  // smoothed gamma
+    // Brightness correction (user-controlled, fixed gamma LUT).
+    int                                 m_brightness = 50;     // 0=dark, 50=neutral, 100=bright
     std::array<uint8_t, 256>            m_gammaLUT = {};        // current LUT
-    double                              m_lutGamma = -1.0;     // gamma used for m_gammaLUT
+    double                              m_lutGamma = 1.0;      // gamma used for m_gammaLUT
 
     // Output dimensions (recording output after crop+scale).
     UINT                                m_outputWidth = 0;

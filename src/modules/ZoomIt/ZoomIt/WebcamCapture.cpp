@@ -42,7 +42,8 @@ WebcamCapture::WebcamCapture(
     Shape shape,
     bool fullScreenRecording,
     WebcamBackgroundMode backgroundMode,
-    const wchar_t* backgroundImagePath )
+    const wchar_t* backgroundImagePath,
+    int brightness )
     : m_d3dDevice( device )
     , m_d3dContext( context )
     , m_deviceSymLink( deviceSymLink ? deviceSymLink : L"" )
@@ -54,11 +55,14 @@ WebcamCapture::WebcamCapture(
     , m_fullScreenRecording( fullScreenRecording )
     , m_backgroundMode( backgroundMode )
     , m_backgroundImagePath( backgroundImagePath ? backgroundImagePath : L"" )
+    , m_brightness( brightness )
 {
-    // Initialize gamma LUT to identity (no correction).
+    // Build the gamma LUT from the user's brightness setting.
+    // brightness 0 → gamma 2.0 (dark), 50 → gamma 1.0 (neutral), 100 → gamma 0.5 (bright).
+    m_lutGamma = pow( 2.0, ( 50 - m_brightness ) / 50.0 );
     for( int i = 0; i < 256; i++ )
-        m_gammaLUT[i] = static_cast<uint8_t>( i );
-    m_lutGamma = 1.0;
+        m_gammaLUT[i] = static_cast<uint8_t>(
+            255.0 * pow( i / 255.0, m_lutGamma ) + 0.5 );
 }
 
 //----------------------------------------------------------------------------
@@ -1103,62 +1107,6 @@ void WebcamCapture::CaptureThread()
             const float cornerRadius = min( halfW, halfH ) *
                 ( m_shape == RoundedSquare ? 0.40f : 0.10f );
 
-            // Adaptive brightness: sample the source frame to compute
-            // average luminance, then derive a gamma that brings it up
-            // to a target level.  This way bright scenes pass through
-            // unchanged while dark scenes get boosted automatically.
-            {
-                constexpr UINT kSampleStep = 8;  // sample every 8th pixel
-                constexpr double kTargetLum = 135.0; // target avg luminance
-                constexpr double kMinGamma  = 0.55;  // max boost
-                constexpr double kSmoothing = 0.15;  // EMA weight for new gamma
-
-                UINT64 lumSum = 0;
-                UINT sampleCount = 0;
-                for( UINT y = 0; y < srcCropH; y += kSampleStep )
-                {
-                    const UINT srcY = srcCropY + y;
-                    const UINT32* row = srcPixels + static_cast<size_t>( srcY ) * srcW32;
-                    for( UINT x = 0; x < srcCropW; x += kSampleStep )
-                    {
-                        UINT32 px = row[srcCropX + x];
-                        UINT32 b = (px      ) & 0xFF;
-                        UINT32 g = (px >>  8) & 0xFF;
-                        UINT32 r = (px >> 16) & 0xFF;
-                        // Approximate luminance: (r + r + g + g + g + b) / 6
-                        lumSum += ( r * 2 + g * 3 + b ) / 6;
-                        sampleCount++;
-                    }
-                }
-
-                double avgLum = ( sampleCount > 0 )
-                    ? static_cast<double>( lumSum ) / sampleCount
-                    : 128.0;
-
-                // Compute the gamma needed to map avgLum → kTargetLum:
-                //   target = 255 * (avgLum/255)^gamma  ⟹
-                //   gamma  = log(target/255) / log(avgLum/255)
-                double desiredGamma = 1.0;
-                if( avgLum < kTargetLum && avgLum > 5.0 )
-                {
-                    desiredGamma = log( kTargetLum / 255.0 ) /
-                                   log( avgLum / 255.0 );
-                    desiredGamma = max( kMinGamma, min( desiredGamma, 1.0 ) );
-                }
-
-                // Smooth over time to avoid brightness flickering.
-                m_currentGamma = m_currentGamma + kSmoothing * ( desiredGamma - m_currentGamma );
-
-                // Rebuild LUT only when gamma changes meaningfully.
-                if( abs( m_currentGamma - m_lutGamma ) > 0.005 )
-                {
-                    m_lutGamma = m_currentGamma;
-                    for( int i = 0; i < 256; i++ )
-                        m_gammaLUT[i] = static_cast<uint8_t>(
-                            255.0 * pow( i / 255.0, m_lutGamma ) + 0.5 );
-                }
-            }
-
             for( UINT y = 0; y < procH; y++ )
             {
                 // Simple nearest-neighbor downsample for blur input.
@@ -1244,7 +1192,7 @@ void WebcamCapture::CaptureThread()
                     maskPtr, mW, mH,
                     ovW, ovH,
                     srcCropX, srcCropY, srcCropW, srcCropH,
-                    static_cast<float>( m_currentGamma ),
+                    static_cast<float>( m_lutGamma ),
                     m_shape,
                     min( ovW * 0.5f, ovH * 0.5f ) *
                         ( m_shape == RoundedSquare ? 0.40f : 0.10f ) );

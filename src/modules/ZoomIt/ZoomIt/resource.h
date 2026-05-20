@@ -131,6 +131,8 @@
 #define IDC_WEBCAM_BG_BROWSE            1130
 #define IDC_THIRDPARTY_NOTICES          1131
 #define IDC_WEBCAM_SETTINGS             1132
+#define IDC_WEBCAM_BRIGHTNESS_LABEL     1133
+#define IDC_WEBCAM_BRIGHTNESS_SLIDER    1134
 #define IDC_TRIM_APPEND                 1122
 #define IDC_RECORD_ASPECT_RATIO         1125
 #define IDC_SAVE                        40002

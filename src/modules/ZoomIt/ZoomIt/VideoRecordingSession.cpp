@@ -34,6 +34,7 @@ extern DWORD g_WebcamShape;
 extern TCHAR g_WebcamDeviceSymLink[MAX_PATH];
 extern DWORD g_WebcamBackgroundMode;
 extern TCHAR g_WebcamBackgroundImage[];
+extern DWORD g_WebcamBrightness;
 extern class ClassRegistry reg;
 extern REG_SETTING RegSettings[];
 extern HINSTANCE g_hInstance;
@@ -1079,7 +1080,8 @@ VideoRecordingSession::VideoRecordingSession(
             webcamShape,
             isFullScreenRecording,
             static_cast<WebcamBackgroundMode>( g_WebcamBackgroundMode ),
-            g_WebcamBackgroundImage );
+            g_WebcamBackgroundImage,
+            static_cast<int>( g_WebcamBrightness ) );
         m_webcamCapture->Start();
         RecDiag( L"Constructor: WebcamCapture::Start() returned\n" );
     }

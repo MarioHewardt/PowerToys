@@ -2934,6 +2934,13 @@ INT_PTR CALLBACK WebcamSettingsProc( HWND hDlg, UINT message, WPARAM wParam, LPA
             SetDlgItemText( hDlg, IDC_WEBCAM_BG_IMAGE, g_WebcamBackgroundImage );
         }
 
+        // Initialize brightness slider
+        {
+            HWND hSlider = GetDlgItem( hDlg, IDC_WEBCAM_BRIGHTNESS_SLIDER );
+            SendMessage( hSlider, TBM_SETRANGE, FALSE, MAKELONG( 0, 100 ) );
+            SendMessage( hSlider, TBM_SETPOS, TRUE, g_WebcamBrightness );
+        }
+
         // Set initial enabled state
         {
             bool isFullScreen = g_WebcamSize == 4;
@@ -3061,6 +3068,7 @@ INT_PTR CALLBACK WebcamSettingsProc( HWND hDlg, UINT message, WPARAM wParam, LPA
             g_WebcamShape = static_cast<DWORD>(SendMessage( GetDlgItem( hDlg, IDC_WEBCAM_SHAPE ), CB_GETCURSEL, 0, 0 ));
             g_WebcamBackgroundMode = static_cast<DWORD>(SendMessage( GetDlgItem( hDlg, IDC_WEBCAM_BG_MODE ), CB_GETCURSEL, 0, 0 ));
             GetDlgItemText( hDlg, IDC_WEBCAM_BG_IMAGE, g_WebcamBackgroundImage, MAX_PATH );
+            g_WebcamBrightness = static_cast<DWORD>(SendMessage( GetDlgItem( hDlg, IDC_WEBCAM_BRIGHTNESS_SLIDER ), TBM_GETPOS, 0, 0 ));
             {
                 int wcIndex = static_cast<int>(SendMessage( GetDlgItem( hDlg, IDC_WEBCAM_DEVICE ), CB_GETCURSEL, 0, 0 ));
                 _tcscpy( g_WebcamDeviceSymLink, wcIndex == 0 ? L"" : webcams[static_cast<size_t>(wcIndex) - 1].first.c_str() );
