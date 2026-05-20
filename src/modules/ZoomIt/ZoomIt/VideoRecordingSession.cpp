@@ -1041,8 +1041,15 @@ VideoRecordingSession::VideoRecordingSession(
                 probeCapture.Close();
                 return true;
             }
+            catch( winrt::hresult_error const& ex )
+            {
+                RecDiag( L"Constructor: webcam probe failed hr=0x%08X: %s\n",
+                         static_cast<unsigned>( ex.code() ), ex.message().c_str() );
+                return false;
+            }
             catch( ... )
             {
+                RecDiag( L"Constructor: webcam probe failed with unknown exception\n" );
                 return false;
             }
         });
@@ -1654,7 +1661,7 @@ public:
         }
         return S_OK;
     }
-    
+
     IFACEMETHODIMP OnFolderChanging(IFileDialog*, IShellItem*) { return S_OK; }
     IFACEMETHODIMP OnSelectionChange(IFileDialog*) { return S_OK; }
     IFACEMETHODIMP OnShareViolation(IFileDialog*, IShellItem*, FDE_SHAREVIOLATION_RESPONSE*) { return S_OK; }
@@ -2833,7 +2840,7 @@ static void HandlePlaybackCommand(int controlId, VideoRecordingSession::TrimDial
     case IDC_TRIM_REWIND:
     {
         StopPlayback(hDlg, pData, false);
-        // Use 1 second step for timelines < 20 seconds, 2 seconds 
+        // Use 1 second step for timelines < 20 seconds, 2 seconds
         const int64_t duration = pData->trimEnd.count() - pData->trimStart.count();
         const int64_t stepTicks = (duration < 200'000'000) ? 10'000'000 : kJogStepTicks;
         const int64_t newTicks = (std::max)(pData->trimStart.count(), pData->currentPosition.count() - stepTicks);
@@ -2849,7 +2856,7 @@ static void HandlePlaybackCommand(int controlId, VideoRecordingSession::TrimDial
     case IDC_TRIM_FORWARD:
     {
         StopPlayback(hDlg, pData, false);
-        // Use 1 second step for timelines < 20 seconds, 2 seconds 
+        // Use 1 second step for timelines < 20 seconds, 2 seconds
         const int64_t duration = pData->trimEnd.count() - pData->trimStart.count();
         const int64_t stepTicks = (duration < 200'000'000) ? 10'000'000 : kJogStepTicks;
         const int64_t newTicks = (std::min)(pData->trimEnd.count(), pData->currentPosition.count() + stepTicks);
@@ -5512,7 +5519,7 @@ INT_PTR CALLBACK VideoRecordingSession::TrimDialogProc(HWND hDlg, UINT message, 
                 const auto relativePos = winrt::TimeSpan{ (std::max)(pData->currentPosition.count() - pData->trimStart.count(), int64_t{ 0 }) };
                 SetTimeText(hDlg, IDC_TRIM_POSITION_LABEL, relativePos, true);
             }
-            
+
             if (elapsedMs >= frameDurationMs)
             {
                 // Time to advance to next frame

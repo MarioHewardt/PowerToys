@@ -58,6 +58,19 @@ public:
     // Returns true if the model has been loaded successfully.
     bool IsInitialized() const { return m_session != nullptr; }
 
+    // Access the segmentation mask after Apply()/ApplyImageReplacement().
+    // The mask has one float [0..1] per pixel at the processing resolution
+    // (1.0 = person / foreground, 0.0 = background).
+    const std::vector<float>& GetMask() const { return m_mask; }
+    uint32_t GetMaskWidth() const { return m_lastMaskWidth; }
+    uint32_t GetMaskHeight() const { return m_lastMaskHeight; }
+    bool HasCachedMask() const { return m_hasCachedMask; }
+
+    // Access the fully-blurred frame after Apply().
+    // Contains all pixels blurred (before mask-based compositing).
+    // Only valid after Apply() — NOT after ApplyImageReplacement().
+    const std::vector<uint8_t>& GetBlurredFrame() const { return m_tempFrame; }
+
 private:
     // Run the segmentation model and produce a float mask [0..1] per pixel.
     bool RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height );
@@ -118,4 +131,8 @@ private:
     static constexpr int    MOTION_GRID_SIZE = 8; // 8×8 = 64 sample points
     float                   m_prevSamples[MOTION_GRID_SIZE * MOTION_GRID_SIZE] = {};
     bool                    m_hasPrevSamples = false;
+
+    // Temporal smoothing: previous frame's mask blended with current
+    // to stabilize edges and reduce flicker.
+    std::vector<float>      m_prevMask;
 };

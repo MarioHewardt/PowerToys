@@ -27,6 +27,19 @@
 
 class BackgroundBlur;
 
+// Must match CompositeConstants cbuffer layout in WebcamComposite.hlsl.
+struct GpuCompositeConstants
+{
+    float CropOffsetX, CropOffsetY;     // Camera crop UV offset
+    float CropScaleX, CropScaleY;       // Camera crop UV scale
+    float Gamma;                        // Gamma correction exponent
+    float CornerRadius;                 // Corner radius in output pixels
+    float OutputW, OutputH;             // Output dimensions
+    UINT  ShapeType;                    // 0=Square, 1=RoundedRect, 2=RoundedSquare, 3=Circle
+    UINT  HasMask;                      // 1 if mask texture valid
+    float Pad[2];
+};
+
 class WebcamCapture
 {
 public:
@@ -112,6 +125,13 @@ private:
     bool InitSourceReader();
     RECT ComputeDestRect() const;
     void ComputeOverlayDimensions();
+    bool InitGpuComposite();
+    bool GpuComposite( const UINT32* cameraPixels, UINT camW, UINT camH,
+                       const UINT32* blurPixels, UINT blurW, UINT blurH,
+                       const float* mask, UINT maskW, UINT maskH,
+                       UINT outW, UINT outH,
+                       UINT srcCropX, UINT srcCropY, UINT srcCropW, UINT srcCropH,
+                       float gamma, Shape shape, float cornerRadius );
 
     winrt::com_ptr<ID3D11Device>        m_d3dDevice;
     winrt::com_ptr<ID3D11DeviceContext> m_d3dContext;
@@ -149,6 +169,11 @@ private:
     UINT                                m_camHeight = 0;
     RECT                                m_destRect = {};
 
+    // Adaptive brightness correction.
+    double                              m_currentGamma = 1.0;  // smoothed gamma
+    std::array<uint8_t, 256>            m_gammaLUT = {};        // current LUT
+    double                              m_lutGamma = -1.0;     // gamma used for m_gammaLUT
+
     // Output dimensions (recording output after crop+scale).
     UINT                                m_outputWidth = 0;
     UINT                                m_outputHeight = 0;
@@ -179,4 +204,37 @@ private:
     int                                 m_compositeCount = 0;
     int                                 m_lockFailCount = 0;
     int                                 m_uploadCount = 0;
+
+    // ── GPU composite pipeline ──────────────────────────────
+    // Separate D3D device for capture thread (avoids contention
+    // with the recording session's device/context).
+    winrt::com_ptr<ID3D11Device>            m_gpuDevice;
+    winrt::com_ptr<ID3D11DeviceContext>      m_gpuContext;
+    winrt::com_ptr<ID3D11VertexShader>       m_compositeVS;
+    winrt::com_ptr<ID3D11PixelShader>        m_compositePS;
+    winrt::com_ptr<ID3D11Buffer>             m_compositeCB;
+    winrt::com_ptr<ID3D11SamplerState>       m_bilinearSampler;
+    winrt::com_ptr<ID3D11RasterizerState>    m_gpuRasterState;
+    winrt::com_ptr<ID3D11BlendState>         m_gpuBlendState;
+
+    // Input textures + SRVs (recreated when dimensions change).
+    winrt::com_ptr<ID3D11Texture2D>          m_gpuCameraTex;
+    winrt::com_ptr<ID3D11ShaderResourceView> m_gpuCameraSRV;
+    UINT                                     m_gpuCameraW = 0, m_gpuCameraH = 0;
+
+    winrt::com_ptr<ID3D11Texture2D>          m_gpuBlurTex;
+    winrt::com_ptr<ID3D11ShaderResourceView> m_gpuBlurSRV;
+    UINT                                     m_gpuBlurW = 0, m_gpuBlurH = 0;
+
+    winrt::com_ptr<ID3D11Texture2D>          m_gpuMaskTex;
+    winrt::com_ptr<ID3D11ShaderResourceView> m_gpuMaskSRV;
+    UINT                                     m_gpuMaskW = 0, m_gpuMaskH = 0;
+
+    // Render target + staging for readback.
+    winrt::com_ptr<ID3D11Texture2D>          m_gpuRenderTarget;
+    winrt::com_ptr<ID3D11RenderTargetView>   m_gpuRTV;
+    winrt::com_ptr<ID3D11Texture2D>          m_gpuStaging;
+    UINT                                     m_gpuRTW = 0, m_gpuRTH = 0;
+
+    bool                                     m_gpuCompositeReady = false;
 };

@@ -321,6 +321,25 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
             }
         }
 
+        // Temporal smoothing: blend the current mask with the previous
+        // frame's mask to stabilize edges and reduce flicker.  A weight
+        // of 0.6 current + 0.4 previous keeps edges responsive while
+        // dampening the frame-to-frame jitter around fine details like
+        // ears, hair, and fingers.
+        {
+            const size_t maskPixels = static_cast<size_t>( width ) * height;
+            if( m_prevMask.size() == maskPixels )
+            {
+                constexpr float alpha = 0.6f;  // current frame weight
+                constexpr float beta  = 0.4f;  // previous frame weight
+                for( size_t i = 0; i < maskPixels; i++ )
+                {
+                    m_mask[i] = alpha * m_mask[i] + beta * m_prevMask[i];
+                }
+            }
+            m_prevMask = m_mask;
+        }
+
         return true;
     }
     catch( winrt::hresult_error const& ex )
