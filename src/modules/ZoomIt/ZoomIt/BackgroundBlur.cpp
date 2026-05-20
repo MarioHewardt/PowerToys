@@ -123,7 +123,8 @@ bool BackgroundBlur::Initialize( const wchar_t* modelPath )
 // to float RGB, runs inference via Windows ML, and produces a float mask
 // in m_mask where 1.0 = person, 0.0 = background.
 //----------------------------------------------------------------------------
-bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height )
+bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height,
+                                      bool modelResOnly )
 {
     const int64_t mW = m_modelInputWidth;
     const int64_t mH = m_modelInputHeight;
@@ -213,6 +214,10 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
             outW = outputShape.GetAt( 2 );
         }
 
+        // Store actual output dimensions for GetModelMaskWidth/Height.
+        m_modelOutputWidth = outW;
+        m_modelOutputHeight = outH;
+
         // Build model-resolution mask first, apply sigmoid sharpening
         // at model resolution (e.g. 256×256 = 65K pixels), then upscale
         // to frame resolution.
@@ -241,6 +246,69 @@ bool BackgroundBlur::RunSegmentation( const uint8_t* bgraPixels, uint32_t width,
 
                 m_erodeBuf[static_cast<size_t>( y * outW + x )] = ( personScore > 0.5f ) ? 1.0f : 0.0f;
             }
+        }
+
+        // ── GPU path: model-resolution post-processing only ────────
+        // When modelResOnly is true, apply feathering and temporal
+        // smoothing at model resolution (e.g. 256×256 = 65K pixels)
+        // and return early.  The GPU's hardware bilinear sampler will
+        // handle upscaling to frame resolution for free.
+        if( modelResOnly )
+        {
+            // Small box blur on m_erodeBuf for edge feathering.
+            // Radius 1 at 256×256 provides similar smoothing to
+            // radius 3 at 960×540 after bilinear upscale.
+            const int modelBlurRadius = 1;
+            const int modelDiam = modelBlurRadius * 2 + 1;
+            m_maskBlurBuf.resize( modelPixels );
+
+            // Horizontal pass.
+            for( int64_t y = 0; y < outH; y++ )
+            {
+                const float* srcRow = m_erodeBuf.data() + y * outW;
+                float* dstRow = m_maskBlurBuf.data() + y * outW;
+                float sum = 0.0f;
+                for( int i = -modelBlurRadius; i <= modelBlurRadius; i++ )
+                    sum += srcRow[(std::max)( int64_t(0), (std::min)( outW - 1, static_cast<int64_t>( i ) ) )];
+                for( int64_t x = 0; x < outW; x++ )
+                {
+                    dstRow[x] = sum / modelDiam;
+                    int64_t remX = (std::max)( int64_t(0), x - modelBlurRadius );
+                    int64_t addX = (std::min)( outW - 1, x + modelBlurRadius + 1 );
+                    sum += srcRow[addX] - srcRow[remX];
+                }
+            }
+
+            // Vertical pass.
+            for( int64_t x = 0; x < outW; x++ )
+            {
+                float sum = 0.0f;
+                for( int i = -modelBlurRadius; i <= modelBlurRadius; i++ )
+                {
+                    int64_t iy = (std::max)( int64_t(0), (std::min)( outH - 1, static_cast<int64_t>( i ) ) );
+                    sum += m_maskBlurBuf[static_cast<size_t>( iy * outW + x )];
+                }
+                for( int64_t y = 0; y < outH; y++ )
+                {
+                    m_erodeBuf[static_cast<size_t>( y * outW + x )] = sum / modelDiam;
+                    int64_t remY = (std::max)( int64_t(0), y - modelBlurRadius );
+                    int64_t addY = (std::min)( outH - 1, y + modelBlurRadius + 1 );
+                    sum += m_maskBlurBuf[static_cast<size_t>( addY * outW + x )] -
+                           m_maskBlurBuf[static_cast<size_t>( remY * outW + x )];
+                }
+            }
+
+            // Temporal smoothing at model resolution.
+            if( m_prevModelMask.size() == modelPixels )
+            {
+                constexpr float alpha = 0.6f;
+                constexpr float beta  = 0.4f;
+                for( size_t i = 0; i < modelPixels; i++ )
+                    m_erodeBuf[i] = alpha * m_erodeBuf[i] + beta * m_prevModelMask[i];
+            }
+            m_prevModelMask = m_erodeBuf;
+
+            return true;
         }
 
         // Upscale processed mask to frame dimensions via bilinear interpolation
@@ -761,4 +829,31 @@ bool BackgroundBlur::Apply( uint8_t* bgraPixels, uint32_t width, uint32_t height
 
     ApplyBlurWithMask( bgraPixels, width, height, blurRadius );
     return true;
+}
+
+//----------------------------------------------------------------------------
+// BackgroundBlur::RunSegmentationOnly
+//
+// Runs the segmentation model and produces the mask, but does NOT blur
+// or modify the pixel buffer.  Used when the GPU compute shader will
+// perform the box blur instead of the CPU.
+//----------------------------------------------------------------------------
+bool BackgroundBlur::RunSegmentationOnly( const uint8_t* bgraPixels, uint32_t width, uint32_t height )
+{
+    if( !m_session || !bgraPixels || width == 0 || height == 0 )
+        return false;
+
+    if( ShouldRunInference( bgraPixels, width, height ) )
+    {
+        // Model-resolution only: skip CPU upscale+feather at frame
+        // resolution — the GPU bilinear sampler handles that.
+        if( !RunSegmentation( bgraPixels, width, height, /*modelResOnly=*/ true ) )
+            return false;
+        m_lastMaskWidth = width;
+        m_lastMaskHeight = height;
+        m_hasCachedMask = true;
+    }
+    m_frameCounter++;
+
+    return m_hasCachedMask;
 }

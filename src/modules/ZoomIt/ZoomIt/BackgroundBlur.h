@@ -66,14 +66,29 @@ public:
     uint32_t GetMaskHeight() const { return m_lastMaskHeight; }
     bool HasCachedMask() const { return m_hasCachedMask; }
 
+    // Run segmentation only (no CPU blur or mask blend).  Use this when
+    // the blur will be performed on the GPU via a compute shader.
+    // Populates the mask (GetMask) but does NOT touch bgraPixels.
+    bool RunSegmentationOnly( const uint8_t* bgraPixels, uint32_t width, uint32_t height );
+
     // Access the fully-blurred frame after Apply().
     // Contains all pixels blurred (before mask-based compositing).
     // Only valid after Apply() — NOT after ApplyImageReplacement().
     const std::vector<uint8_t>& GetBlurredFrame() const { return m_tempFrame; }
 
+    // Access the model-resolution mask before upscaling (e.g. 256×256).
+    // Useful when the GPU handles upscaling via hardware bilinear filtering.
+    const std::vector<float>& GetModelMask() const { return m_erodeBuf; }
+    int64_t GetModelMaskWidth() const { return m_modelOutputWidth; }
+    int64_t GetModelMaskHeight() const { return m_modelOutputHeight; }
+
 private:
     // Run the segmentation model and produce a float mask [0..1] per pixel.
-    bool RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height );
+    // When modelResOnly is true, stops after model-resolution post-processing
+    // (feathering + temporal smoothing at 256×256) and skips the CPU upscale
+    // to frame resolution — the GPU bilinear sampler handles that instead.
+    bool RunSegmentation( const uint8_t* bgraPixels, uint32_t width, uint32_t height,
+                          bool modelResOnly = false );
 
     // Apply box blur (iterated for Gaussian approximation) to bgraPixels
     // only where the mask indicates background.
@@ -101,6 +116,10 @@ private:
     int64_t                 m_modelInputChannels = 3;
     bool                    m_inputIsNchw = true; // true = [1,C,H,W], false = [1,H,W,C]
     bool                    m_usingGpu = false;   // true if DirectML session is active
+
+    // Actual model output dimensions (may differ from input dimensions).
+    int64_t                 m_modelOutputWidth = 256;
+    int64_t                 m_modelOutputHeight = 256;
 
     // Reusable buffers to avoid per-frame allocations.
     std::vector<float>      m_inputTensor;      // RGB float [1,3,H,W] or [1,H,W,3]
@@ -135,4 +154,7 @@ private:
     // Temporal smoothing: previous frame's mask blended with current
     // to stabilize edges and reduce flicker.
     std::vector<float>      m_prevMask;
+
+    // Model-resolution previous mask for GPU path temporal smoothing.
+    std::vector<float>      m_prevModelMask;
 };

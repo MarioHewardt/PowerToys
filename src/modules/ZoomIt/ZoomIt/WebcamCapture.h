@@ -40,6 +40,15 @@ struct GpuCompositeConstants
     float Pad[2];
 };
 
+// Must match BlurConstants cbuffer layout in BoxBlurCS.hlsl.
+struct GpuBlurConstants
+{
+    UINT  Direction;    // 0 = horizontal, 1 = vertical
+    INT   Radius;       // Box blur radius in pixels
+    UINT  Width;        // Image width
+    UINT  Height;       // Image height
+};
+
 class WebcamCapture
 {
 public:
@@ -132,7 +141,13 @@ private:
                        const float* mask, UINT maskW, UINT maskH,
                        UINT outW, UINT outH,
                        UINT srcCropX, UINT srcCropY, UINT srcCropW, UINT srcCropH,
-                       float gamma, Shape shape, float cornerRadius );
+                       float gamma, Shape shape, float cornerRadius,
+                       ID3D11ShaderResourceView* preBlurSRV = nullptr );
+
+    // GPU box blur: runs 4 compute-shader dispatches (H→V→H→V) on the
+    // processing-resolution frame.  The result stays GPU-resident in
+    // m_blurPingPong[0] for direct use by GpuComposite.
+    bool GpuBoxBlur( const UINT32* pixels, UINT width, UINT height, int radius );
 
     winrt::com_ptr<ID3D11Device>        m_d3dDevice;
     winrt::com_ptr<ID3D11DeviceContext> m_d3dContext;
@@ -238,4 +253,15 @@ private:
     UINT                                     m_gpuRTW = 0, m_gpuRTH = 0;
 
     bool                                     m_gpuCompositeReady = false;
+
+    // ── GPU box-blur compute pipeline ───────────────────────
+    winrt::com_ptr<ID3D11ComputeShader>      m_blurCS;
+    winrt::com_ptr<ID3D11Buffer>             m_blurCB;
+
+    // Ping-pong textures with SRV + UAV for blur passes.
+    winrt::com_ptr<ID3D11Texture2D>          m_blurPingPong[2];
+    winrt::com_ptr<ID3D11ShaderResourceView> m_blurPingSRV[2];
+    winrt::com_ptr<ID3D11UnorderedAccessView> m_blurPingUAV[2];
+    UINT                                     m_blurPPW = 0, m_blurPPH = 0;
+    bool                                     m_gpuBlurReady = false;
 };
