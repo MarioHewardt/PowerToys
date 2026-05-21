@@ -274,7 +274,7 @@ BEGIN
     LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,48,251,19
     CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,124,86,10
     CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,125,124,83,10
-    CONTROL         "&Noise cancellation",IDC_NOISE_CANCELLATION,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,213,124,47,10
+    CONTROL         "&Noise cancellation",IDC_NOISE_CANCELLATION,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,190,124,70,10
     COMBOBOX        IDC_MICROPHONE,81,137,128,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,34,139,47,8
     CONTROL         "Show &webcam overlay (Ctrl+C toggles)",IDC_WEBCAM_OVERLAY,
