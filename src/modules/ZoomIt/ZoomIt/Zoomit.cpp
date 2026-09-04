@@ -10071,6 +10071,7 @@ LRESULT APIENTRY MainWndProc(
             {
                 SetCursorPos( local_savedCursorPos.x, local_savedCursorPos.y );
             }
+            SetCursor( LoadCursor( nullptr, IDC_ARROW ) );
             g_RecordCropping = FALSE;
 
             copyX = copyRc.left;
@@ -10249,6 +10250,11 @@ LRESULT APIENTRY MainWndProc(
                 dictation.Cancel();
                 dictation.ClearCallbacks();
                 badge.Hide();
+                if( lParam != SHALLOW_ZOOM )
+                {
+                    SetCursorPos( local_savedCursorPos.x, local_savedCursorPos.y );
+                }
+                SetCursor( LoadCursor( nullptr, IDC_ARROW ) );
                 g_RecordCropping = FALSE;
                 break;
             }
@@ -10258,6 +10264,7 @@ LRESULT APIENTRY MainWndProc(
             {
                 SetCursorPos( local_savedCursorPos.x, local_savedCursorPos.y );
             }
+            SetCursor( LoadCursor( nullptr, IDC_ARROW ) );
             g_RecordCropping = FALSE;
 
             int copyX = copyRc.left;
@@ -10290,10 +10297,11 @@ LRESULT APIENTRY MainWndProc(
             SelectObject( hSaveDc, hPrevBitmap );
 
             std::wstring transcript;
+            bool dictationCancelled = false;
             if( listeningStarted )
             {
-                badge.SetStatus( L"Transcribing..." );
-                transcript = dictation.Stop( g_SnipDictateGrace );
+                badge.SetStatus( L"Transcribing... Press Esc to cancel." );
+                transcript = dictation.Stop( g_SnipDictateGrace, &dictationCancelled );
             }
             else
             {
@@ -10301,6 +10309,13 @@ LRESULT APIENTRY MainWndProc(
             }
             dictation.ClearCallbacks();
             badge.Hide();
+
+            if( dictationCancelled )
+            {
+                DeleteObject( hSaveBitmap );
+                DeleteDC( hSaveDc );
+                break;
+            }
 
             std::wstring annotation;
             if( !transcript.empty() )
