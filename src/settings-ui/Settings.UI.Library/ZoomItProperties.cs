@@ -31,6 +31,10 @@ namespace Microsoft.PowerToys.Settings.UI.Library
         [CmdConfigureIgnore]
         public static HotkeySettings DefaultSnipOcrToggleKey => new HotkeySettings(false, true, true, false, '6'); // Ctrl+Alt+6
 
+        // Unassigned by default: dictation is normally armed by tapping Space during the snip drag.
+        [CmdConfigureIgnore]
+        public static HotkeySettings DefaultSnipDictateToggleKey => new HotkeySettings();
+
         [CmdConfigureIgnore]
         public static HotkeySettings DefaultBreakTimerKey => new HotkeySettings(false, true, false, false, '3'); // Ctrl+3
 
@@ -48,6 +52,8 @@ namespace Microsoft.PowerToys.Settings.UI.Library
         public KeyboardKeysProperty SnipToggleKey { get; set; }
 
         public KeyboardKeysProperty SnipOcrToggleKey { get; set; }
+
+        public KeyboardKeysProperty SnipDictateToggleKey { get; set; }
 
         public KeyboardKeysProperty BreakTimerKey { get; set; }
 
@@ -99,5 +105,13 @@ namespace Microsoft.PowerToys.Settings.UI.Library
         public BoolProperty CaptureAudio { get; set; }
 
         public StringProperty MicrophoneDeviceId { get; set; }
+
+        public BoolProperty SnipDictateEnabled { get; set; }
+
+        public BoolProperty SnipDictateOnSnip { get; set; }
+
+        public IntProperty SnipDictateGrace { get; set; }
+
+        public StringProperty SnipDictatePrefix { get; set; }
     }
 }

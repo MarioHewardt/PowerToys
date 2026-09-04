@@ -19,6 +19,10 @@
 #include "BreakTimer.h"
 #include "PanoramaCapture.h"
 #include "ZoomAnimation.h"
+#include "ClipboardPayload.h"
+#include "PasteChaperone.h"
+#include "DictationSession.h"
+#include "DictationBadge.h"
 #include <wtsapi32.h>
 #include <tlhelp32.h>
 #include <limits>
@@ -48,6 +52,7 @@ enum class ZoomItCommand
     LiveZoom,
     Snip,
     SnipOcr,
+    SnipDictate,
     Record,
 };
 #endif // __ZOOMIT_POWERTOYS__
@@ -101,6 +106,7 @@ COLORREF	g_CustomColors[16];
 #define SNIP_OCR_HOTKEY          18
 #define SNIP_PANORAMA_HOTKEY     19
 #define SNIP_PANORAMA_SAVE_HOTKEY 20
+#define SNIP_DICTATE_HOTKEY      21
 
 #define ZOOM_PAGE	  0
 #define LIVE_PAGE	  1
@@ -173,6 +179,25 @@ DWORD	g_RecordToggleMod;
 DWORD   g_SnipToggleMod;
 DWORD   g_SnipPanoramaToggleMod;
 DWORD   g_SnipOcrToggleMod;
+DWORD   g_SnipDictateToggleMod;
+
+//
+// Set immediately before a dictation snip is dispatched. When TRUE the
+// microphone opens as soon as the drag begins; otherwise the user arms it
+// mid-drag with the dictation key.
+//
+BOOL    g_SnipDictateAutoStart = FALSE;
+
+//
+// Speech recognition session used by snip-with-dictation. It is intentionally
+// leaked so that its worker thread is never joined during static destruction
+// at process exit.
+//
+static DictationSession& GetDictationSession()
+{
+    static DictationSession* session = new DictationSession();
+    return *session;
+}
 
 BOOLEAN	g_ZoomOnLiveZoom = FALSE;
 DWORD	g_PenWidth = PEN_WIDTH;
@@ -410,6 +435,7 @@ const wchar_t* HotkeyIdToString( WPARAM hotkeyId )
     case SNIP_OCR_HOTKEY: return L"SNIP_OCR_HOTKEY";
     case SNIP_PANORAMA_HOTKEY: return L"SNIP_PANORAMA_HOTKEY";
     case SNIP_PANORAMA_SAVE_HOTKEY: return L"SNIP_PANORAMA_SAVE_HOTKEY";
+    case SNIP_DICTATE_HOTKEY: return L"SNIP_DICTATE_HOTKEY";
     default: return L"UNKNOWN_HOTKEY";
     }
 }
@@ -2732,11 +2758,12 @@ INT_PTR CALLBACK OptionsTabProc( HWND hDlg, UINT message,
                     }
                 }
 
-                // Enable/disable audio controls based on selection (GIF has no audio)
+                // GIF cannot record audio, but the microphone remains
+                // selectable because dictation uses it independently.
                 EnableWindow(GetDlgItem(hDlg, IDC_CAPTURE_SYSTEM_AUDIO), !isGifSelected);
                 EnableWindow(GetDlgItem(hDlg, IDC_CAPTURE_AUDIO), !isGifSelected);
-                EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE_LABEL), !isGifSelected);
-                EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE), !isGifSelected);
+                EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE_LABEL), TRUE);
+                EnableWindow(GetDlgItem(hDlg, IDC_MICROPHONE), TRUE);
             }
         }
 
@@ -3028,6 +3055,7 @@ void UnregisterAllHotkeys( HWND hWnd )
     unregisterHotkey( SNIP_PANORAMA_HOTKEY );
     unregisterHotkey( SNIP_PANORAMA_SAVE_HOTKEY );
     unregisterHotkey( SNIP_OCR_HOTKEY );
+    unregisterHotkey( SNIP_DICTATE_HOTKEY );
     unregisterHotkey( DEMOTYPE_HOTKEY );
     unregisterHotkey( DEMOTYPE_RESET_HOTKEY );
     unregisterHotkey( RECORD_GIF_HOTKEY );
@@ -3073,6 +3101,9 @@ void RegisterAllHotkeys(HWND hWnd)
     }
     if (g_SnipOcrToggleKey) {
         registerHotkey( SNIP_OCR_HOTKEY, g_SnipOcrToggleMod, g_SnipOcrToggleKey & 0xFF );
+    }
+    if (g_SnipDictateEnabled && g_SnipDictateToggleKey) {
+        registerHotkey( SNIP_DICTATE_HOTKEY, g_SnipDictateToggleMod, g_SnipDictateToggleKey & 0xFF );
     }
     if (g_RecordToggleKey) {
         registerHotkey( RECORD_HOTKEY, g_RecordToggleMod | MOD_NOREPEAT, g_RecordToggleKey & 0xFF );
@@ -4295,6 +4326,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
     TCHAR			text[32];
     DWORD			newToggleKey, newTimeout, newToggleMod, newBreakToggleKey, newDemoTypeToggleKey, newRecordToggleKey, newSnipToggleKey, newSnipPanoramaToggleKey, newSnipOcrToggleKey;
     DWORD			newDrawToggleKey, newDrawToggleMod, newBreakToggleMod, newDemoTypeToggleMod, newRecordToggleMod, newSnipToggleMod, newSnipPanoramaToggleMod, newSnipOcrToggleMod;
+    DWORD			newSnipDictateToggleKey, newSnipDictateToggleMod;
     DWORD			newLiveZoomToggleKey, newLiveZoomToggleMod;
     static std::vector<std::pair<std::wstring, std::wstring>>	microphones;
 
@@ -4448,6 +4480,15 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
     };
 
     switch ( message )  {
+    case WM_ACTIVATE:
+        //
+        // The speech privacy policy is changed in the Settings app, so refresh
+        // the accuracy line whenever the user comes back to this dialog.
+        //
+        if( LOWORD( wParam ) != WA_INACTIVE ) {
+        }
+        break;
+
     case WM_INITDIALOG:
     {
         if( hWndOptions ) {
@@ -4531,6 +4572,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         if( g_SnipToggleKey) 	SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_HOTKEY), HKM_SETHOTKEY, g_SnipToggleKey, 0 );
         if( g_SnipPanoramaToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_SETHOTKEY, g_SnipPanoramaToggleKey, 0 );
         if( g_SnipOcrToggleKey) SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_SETHOTKEY, g_SnipOcrToggleKey, 0 );
+        CheckDlgButton( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_DICTATE_ENABLED,
+            g_SnipDictateEnabled ? BST_CHECKED : BST_UNCHECKED );
         CheckDlgButton( hDlg, IDC_SHOW_TRAY_ICON,
             g_ShowTrayIcon ? BST_CHECKED: BST_UNCHECKED );
         CheckDlgButton( hDlg, IDC_AUTOSTART,
@@ -4633,12 +4676,13 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
         }
         SendMessage( GetDlgItem( g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE ), CB_SETCURSEL, static_cast<WPARAM>(selection), static_cast<LPARAM>(0) );
 
-        // Set initial state of audio controls based on recording format (GIF has no audio)
+        // GIF cannot record audio, but the microphone remains selectable
+        // because dictation uses it independently.
         bool isGifSelected = (g_RecordingFormat == RecordingFormat::GIF);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_SYSTEM_AUDIO), !isGifSelected);
         EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_CAPTURE_AUDIO), !isGifSelected);
-        EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE_LABEL), !isGifSelected);
-        EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE), !isGifSelected);
+        EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE_LABEL), TRUE);
+        EnableWindow(GetDlgItem(g_OptionsTabs[RECORD_PAGE].hPage, IDC_MICROPHONE), TRUE);
 
         if( GetFileAttributes( g_DemoTypeFile ) == -1 )
         {
@@ -4972,6 +5016,7 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             newSnipPanoramaToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[PANORAMA_PAGE].hPage, IDC_SNIP_PANORAMA_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
             newSnipOcrToggleKey = static_cast<DWORD>(SendMessage( GetDlgItem( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_OCR_HOTKEY), HKM_GETHOTKEY, 0, 0 ));
+            newSnipDictateToggleKey = g_SnipDictateToggleKey;
 
             newToggleMod = GetKeyMod( newToggleKey );
             newLiveZoomToggleMod = GetKeyMod( newLiveZoomToggleKey );
@@ -4982,6 +5027,9 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
             newSnipToggleMod = GetKeyMod( newSnipToggleKey );
             newSnipPanoramaToggleMod = GetKeyMod( newSnipPanoramaToggleKey );
             newSnipOcrToggleMod = GetKeyMod( newSnipOcrToggleKey );
+            newSnipDictateToggleMod = GetKeyMod( newSnipDictateToggleKey );
+
+            g_SnipDictateEnabled = IsDlgButtonChecked( g_OptionsTabs[SNIP_PAGE].hPage, IDC_SNIP_DICTATE_ENABLED ) == BST_CHECKED;
 
             g_SliderZoomLevel = static_cast<int>(SendMessage( GetDlgItem(g_OptionsTabs[ZOOM_PAGE].hPage, IDC_ZOOM_SLIDER), TBM_GETPOS, 0, 0 ));
             g_DemoTypeSpeedSlider = static_cast<int>(SendMessage( GetDlgItem( g_OptionsTabs[DEMOTYPE_PAGE].hPage, IDC_DEMOTYPE_SPEED_SLIDER ), TBM_GETPOS, 0, 0 ));
@@ -5072,6 +5120,15 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 break;
 
             }
+            else if (g_SnipDictateEnabled && newSnipDictateToggleKey &&
+                !RegisterHotKey(GetParent(hDlg), SNIP_DICTATE_HOTKEY, newSnipDictateToggleMod, newSnipDictateToggleKey & 0xFF)) {
+
+                MessageBox(hDlg, L"The specified snip dictation hotkey is already in use.\nSelect a different snip dictation hotkey.",
+                    APPNAME, MB_ICONERROR);
+                UnregisterAllHotkeys(GetParent(hDlg));
+                break;
+
+            }
             else if( newRecordToggleKey &&
                 (!RegisterHotKey(GetParent(hDlg), RECORD_HOTKEY,      newRecordToggleMod | MOD_NOREPEAT, newRecordToggleKey & 0xFF) ||
                  !RegisterHotKey(GetParent(hDlg), RECORD_CROP_HOTKEY, (newRecordToggleMod ^ MOD_SHIFT) | MOD_NOREPEAT, newRecordToggleKey & 0xFF) ||
@@ -5102,6 +5159,8 @@ INT_PTR CALLBACK OptionsProc( HWND hDlg, UINT message,
                 g_SnipPanoramaToggleMod = newSnipPanoramaToggleMod;
                 g_SnipOcrToggleKey = newSnipOcrToggleKey;
                 g_SnipOcrToggleMod = newSnipOcrToggleMod;
+                g_SnipDictateToggleKey = newSnipDictateToggleKey;
+                g_SnipDictateToggleMod = newSnipDictateToggleMod;
                 reg.WriteRegSettings( RegSettings );
                 EnableDisableTrayIcon( GetParent( hDlg ), g_ShowTrayIcon );
 
@@ -6953,6 +7012,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipToggleMod = GetKeyMod( g_SnipToggleKey );
         g_SnipPanoramaToggleMod = GetKeyMod( g_SnipPanoramaToggleKey );
         g_SnipOcrToggleMod = GetKeyMod( g_SnipOcrToggleKey );
+        g_SnipDictateToggleMod = GetKeyMod( g_SnipDictateToggleKey );
         g_RecordToggleMod = GetKeyMod( g_RecordToggleKey );
 
         if( !g_OptionsShown && !g_StartedByPowerToys ) {
@@ -7024,6 +7084,14 @@ LRESULT APIENTRY MainWndProc(
                 !RegisterHotKey(hWnd, SNIP_OCR_HOTKEY, g_SnipOcrToggleMod, g_SnipOcrToggleKey & 0xFF)) {
 
                 MessageBox(hWnd, L"The specified snip OCR hotkey is already in use.\nSelect a different snip OCR hotkey.",
+                    APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+
+            }
+            else if (g_SnipDictateEnabled && g_SnipDictateToggleKey &&
+                !RegisterHotKey(hWnd, SNIP_DICTATE_HOTKEY, g_SnipDictateToggleMod, g_SnipDictateToggleKey & 0xFF)) {
+
+                MessageBox(hWnd, L"The specified snip dictation hotkey is already in use.\nSelect a different snip dictation hotkey.",
                     APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
 
@@ -7326,7 +7394,14 @@ LRESULT APIENTRY MainWndProc(
             }
             else
             {
-                SendMessage( hWnd, WM_COMMAND, IDC_COPY_CROP, ( zoomed ? 0 : SHALLOW_ZOOM ) );
+                //
+                // When dictation is enabled every snip goes through the
+                // dictation path so that the user can arm the microphone
+                // mid-drag with the dictation key. It only starts listening up
+                // front when they asked for that.
+                //
+                g_SnipDictateAutoStart = g_SnipDictateEnabled && g_SnipDictateOnSnip;
+                SendMessage( hWnd, WM_COMMAND, g_SnipDictateEnabled ? IDC_COPY_CROP_DICTATE : IDC_COPY_CROP, ( zoomed ? 0 : SHALLOW_ZOOM ) );
             }
 
             // Now if we weren't zoomed, unzoom
@@ -7425,6 +7500,86 @@ LRESULT APIENTRY MainWndProc(
                 if( GetWindowLong( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED )
                 {
                     OutputDebug( L"Exiting liveDraw after snip OCR\n" );
+                    SendMessage( hWnd, WM_KEYDOWN, VK_ESCAPE, 0 );
+                }
+            }
+            break;
+        }
+
+        case SNIP_DICTATE_HOTKEY:
+        {
+            OutputDebugStringW( L"[SnipDictate] Hotkey received\n" );
+
+            if( !g_SnipDictateEnabled )
+            {
+                break;
+            }
+
+            // Same mirroring limitation as snip OCR.
+            if( IsWindowVisible( g_hWndLiveZoom )
+                && ( GetWindowLongPtr( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED ) )
+            {
+                break;
+            }
+
+            bool zoomed = true;
+#ifdef __ZOOMIT_POWERTOYS__
+            if( g_StartedByPowerToys )
+            {
+                Trace::ZoomItActivateSnipDictate();
+            }
+#endif // __ZOOMIT_POWERTOYS__
+
+            // First, static zoom at 1x
+            if( !g_Zoomed )
+            {
+                zoomed = false;
+                if( IsWindowVisible( g_hWndLiveZoom ) && !g_LiveZoomLevelOne )
+                {
+                    SendMessage( hWnd, WM_HOTKEY, ZOOM_HOTKEY, SHALLOW_ZOOM );
+                }
+                else
+                {
+                    SendMessage( hWnd, WM_HOTKEY, ZOOM_HOTKEY, LIVE_DRAW_ZOOM );
+                }
+                zoomLevel = zoomTelescopeTarget = 1;
+            }
+            else if( g_Drawing )
+            {
+                SendMessage( hWnd, WM_USER_EXIT_MODE, 0, 0 );
+                if( g_Drawing )
+                {
+                    SendMessage( hWnd, WM_USER_EXIT_MODE, 0, 0 );
+                }
+            }
+            ShowMainWindow( hWnd, monInfo, width, height );
+
+            // The dedicated dictation hotkey is an explicit request to dictate,
+            // so it opens the microphone as soon as the drag begins.
+            g_SnipDictateAutoStart = TRUE;
+            SendMessage( hWnd, WM_COMMAND, IDC_COPY_CROP_DICTATE, ( zoomed ? 0 : SHALLOW_ZOOM ) );
+
+            // Now if we weren't zoomed, unzoom
+            if( !zoomed )
+            {
+                if( g_ZoomOnLiveZoom )
+                {
+                    ShowCursor( false );
+                    SendMessage( hWnd, WM_HOTKEY, ZOOM_HOTKEY, 0 );
+                    ShowCursor( true );
+                }
+                else
+                {
+                    SendMessage( hWnd, WM_HOTKEY, ZOOM_HOTKEY, SHALLOW_ZOOM );
+                }
+            }
+
+            // exit zoom
+            if( g_Zoomed )
+            {
+                if( GetWindowLong( hWnd, GWL_EXSTYLE ) & WS_EX_LAYERED )
+                {
+                    OutputDebug( L"Exiting liveDraw after snip dictate\n" );
                     SendMessage( hWnd, WM_KEYDOWN, VK_ESCAPE, 0 );
                 }
             }
@@ -9518,6 +9673,7 @@ LRESULT APIENTRY MainWndProc(
         g_SnipToggleMod = GetKeyMod(g_SnipToggleKey);
         g_SnipPanoramaToggleMod = GetKeyMod(g_SnipPanoramaToggleKey);
         g_SnipOcrToggleMod = GetKeyMod(g_SnipOcrToggleKey);
+        g_SnipDictateToggleMod = GetKeyMod(g_SnipDictateToggleKey);
         g_RecordToggleMod = GetKeyMod(g_RecordToggleKey);
         BOOL showOptions = FALSE;
         if (g_ToggleKey)
@@ -9586,6 +9742,14 @@ LRESULT APIENTRY MainWndProc(
             if (!RegisterHotKey(hWnd, SNIP_OCR_HOTKEY, g_SnipOcrToggleMod, g_SnipOcrToggleKey & 0xFF))
             {
                 MessageBox(hWnd, L"The specified snip OCR hotkey is already in use.\nSelect a different snip OCR hotkey.", APPNAME, MB_ICONERROR);
+                showOptions = TRUE;
+            }
+        }
+        if (g_SnipDictateEnabled && g_SnipDictateToggleKey)
+        {
+            if (!RegisterHotKey(hWnd, SNIP_DICTATE_HOTKEY, g_SnipDictateToggleMod, g_SnipDictateToggleKey & 0xFF))
+            {
+                MessageBox(hWnd, L"The specified snip dictation hotkey is already in use.\nSelect a different snip dictation hotkey.", APPNAME, MB_ICONERROR);
                 showOptions = TRUE;
             }
         }
@@ -9964,6 +10128,203 @@ LRESULT APIENTRY MainWndProc(
                     }
                 }
                 CloseClipboard();
+            }
+
+            DeleteObject( hSaveBitmap );
+            DeleteDC( hSaveDc );
+            break;
+        }
+
+        case IDC_COPY_CROP_DICTATE:
+        {
+            if( !g_SnipDictateEnabled )
+            {
+                break;
+            }
+
+            g_RecordCropping = TRUE;
+            POINT local_savedCursorPos{};
+            if( lParam != SHALLOW_ZOOM )
+            {
+                GetCursorPos( &local_savedCursorPos );
+            }
+
+            DictationBadge badge;
+            DictationSession& dictation = GetDictationSession();
+            SelectRectangle selectRectangle;
+
+            //
+            // Listening either begins with the drag (dedicated dictation hotkey
+            // or the "dictate on every snip" option) or when the user taps the
+            // dictation key partway through the drag.
+            //
+            const bool autoStartDictation = g_SnipDictateAutoStart;
+            g_SnipDictateAutoStart = FALSE;
+            bool listeningStarted = false;
+
+            // Where the badge sits. Tracks the selection once the drag starts.
+            RECT badgeAnchor = monInfo.rcMonitor;
+
+            // The transcription arrives on the recognition worker thread. The
+            // badge marshals to its own thread internally.
+            dictation.OnTextChanged( [&badge]( const std::wstring& text ) {
+                badge.SetText( text );
+            } );
+
+            //
+            // Report what the engine is actually doing. Start only queues work,
+            // so assuming success here would tell the user that ZoomIt is
+            // listening when it may have failed to open the microphone.
+            //
+            dictation.OnStatusChanged( [&badge, &dictation]( DictationSession::Status status,
+                                                 DictationSession::Failure failure ) {
+                switch( status )
+                {
+                case DictationSession::Status::Preparing:
+                    badge.SetStatus( L"Starting dictation..." );
+                    break;
+                case DictationSession::Status::Listening:
+                    badge.SetStatus( L"Listening. Release to snip." );
+                    break;
+                case DictationSession::Status::Finalizing:
+                    badge.SetStatus( L"Transcribing..." );
+                    break;
+                case DictationSession::Status::Unavailable:
+                    badge.SetStatus( DictationSession::DescribeFailure( failure ) );
+                    break;
+                default:
+                    break;
+                }
+            } );
+
+            auto beginListening = [&] {
+                if( listeningStarted )
+                {
+                    return;
+                }
+
+                listeningStarted = true;
+                badge.Show( hWnd, badgeAnchor );
+                if( !dictation.Start() )
+                {
+                    badge.SetStatus( DictationSession::DescribeFailure( dictation.GetFailure() ) );
+                }
+            };
+
+            // Keeps the badge centered on the top edge of the selection as it
+            // is dragged out. Reposition is a no-op until the badge is shown.
+            selectRectangle.OnSelectionChanged( [&]( const RECT& selection ) {
+                badgeAnchor = selection;
+                badge.Reposition( selection );
+            } );
+
+            // The badge only appears once the user actually asks to dictate, so
+            // an ordinary snip is visually unchanged.
+            selectRectangle.OnDragStarted( [&] {
+                // There is no selection yet, so start out on the cursor rather
+                // than stranding the badge in the middle of the screen.
+                POINT cursor{};
+                GetCursorPos( &cursor );
+                badgeAnchor = { cursor.x, cursor.y, cursor.x, cursor.y };
+
+                if( autoStartDictation )
+                {
+                    beginListening();
+                }
+            } );
+
+            selectRectangle.OnDictateRequested( [&] {
+                beginListening();
+            } );
+
+            selectRectangle.OnCancelled( [&] {
+                dictation.Cancel();
+                badge.Hide();
+            } );
+
+            dictation.Prewarm();
+
+            if( !selectRectangle.Start( hWnd ) )
+            {
+                dictation.Cancel();
+                dictation.ClearCallbacks();
+                badge.Hide();
+                g_RecordCropping = FALSE;
+                break;
+            }
+            auto copyRc = selectRectangle.SelectedRect();
+            selectRectangle.Stop();
+            if( lParam != SHALLOW_ZOOM )
+            {
+                SetCursorPos( local_savedCursorPos.x, local_savedCursorPos.y );
+            }
+            g_RecordCropping = FALSE;
+
+            int copyX = copyRc.left;
+            int copyY = copyRc.top;
+            int copyWidth = copyRc.right - copyRc.left;
+            int copyHeight = copyRc.bottom - copyRc.top;
+
+            if( copyWidth <= 0 || copyHeight <= 0 )
+            {
+                dictation.Cancel();
+                dictation.ClearCallbacks();
+                badge.Hide();
+                break;
+            }
+
+            // Capture before finalizing the transcription so that the image
+            // matches the screen at the moment the button was released.
+            HBITMAP hSaveBitmap = CreateCompatibleBitmap( hdcScreen, copyWidth, copyHeight );
+            HDC hSaveDc = CreateCompatibleDC( hdcScreen );
+            HGDIOBJ hPrevBitmap = SelectObject( hSaveDc, hSaveBitmap );
+            SetStretchBltMode( hSaveDc, g_SmoothImage ? HALFTONE : COLORONCOLOR );
+            StretchBlt( hSaveDc,
+                        0, 0,
+                        copyWidth, copyHeight,
+                        hdcScreen,
+                        monInfo.rcMonitor.left + copyX,
+                        monInfo.rcMonitor.top + copyY,
+                        copyWidth, copyHeight,
+                        SRCCOPY | CAPTUREBLT );
+            SelectObject( hSaveDc, hPrevBitmap );
+
+            std::wstring transcript;
+            if( listeningStarted )
+            {
+                badge.SetStatus( L"Transcribing..." );
+                transcript = dictation.Stop( g_SnipDictateGrace );
+            }
+            else
+            {
+                dictation.Cancel();
+            }
+            dictation.ClearCallbacks();
+            badge.Hide();
+
+            std::wstring annotation;
+            if( !transcript.empty() )
+            {
+                annotation = g_SnipDictatePrefix;
+                if( !annotation.empty() )
+                {
+                    annotation += L' ';
+                }
+                annotation += transcript;
+            }
+
+            // With no transcription this publishes exactly the image formats,
+            // so a silent dictation snip behaves like a plain snip.
+            DWORD formats = annotation.empty() ? SNIP_CLIPBOARD_IMAGE : g_SnipDictateClipboardFormats;
+
+            // Applications that accept both an image and text from one paste,
+            // such as OneNote and Word, are served by the combined payload.
+            // For the ones that accept only one of the two the chaperone turns
+            // the user's single Ctrl+V into an image paste followed by a text
+            // paste; it falls back to the combined payload when it cannot arm.
+            if( annotation.empty() || !PasteChaperone::Arm( hSaveBitmap, annotation, formats ) )
+            {
+                PublishSnipClipboard( hWnd, hSaveBitmap, annotation, formats );
             }
 
             DeleteObject( hSaveBitmap );
@@ -10594,7 +10955,7 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             if( g_RecordCropping == TRUE )
             {
                 // Still redraw to keep the contents live
-                InvalidateRect( g_hWndLiveZoomMag, nullptr, TRUE );
+                InvalidateRect( g_hWndLiveZoomMag, nullptr, FALSE );
                 break;
             }
 
@@ -10685,8 +11046,13 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 if( zoomCenterPos.x == 0 )
                     zoomCenterPos.x = lastSourceRect.left + sourceRectWidth/2;
 
-                int zoomWidth = static_cast<int>(width / zoomLevel);
-                int zoomHeight = static_cast<int>(height/ zoomLevel);
+                // Round up so a viewport clamped to the right or bottom edge
+                // still contains every source pixel needed by the fractional
+                // transform. Rounding down lets the transform sample just
+                // beyond the desktop and the Magnification API returns a
+                // black frame.
+                int zoomWidth = static_cast<int>( std::ceil( static_cast<float>(width) / zoomLevel ) );
+                int zoomHeight = static_cast<int>( std::ceil( static_cast<float>(height) / zoomLevel ) );
                 sourceRect.left = zoomCenterPos.x - zoomWidth / 2;
                 sourceRect.top = zoomCenterPos.y -  zoomHeight / 2;
 
@@ -10744,8 +11110,10 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
 
             if( !g_fullScreenWorkaround ) {
 
-                // Force redraw to refresh screen contents
-                InvalidateRect(g_hWndLiveZoomMag, NULL, TRUE);
+                // The magnifier repaints the entire invalid region. Erasing
+                // its background first exposes a blank frame between erase
+                // and paint, which appears as a flash during transitions.
+                InvalidateRect( g_hWndLiveZoomMag, nullptr, FALSE );
             }
 
             // are we done zooming?
@@ -11111,6 +11479,10 @@ void ZoomIt_DispatchCommand(ZoomItCommand cmd)
         post_hotkey(SNIP_OCR_HOTKEY);
         Trace::ZoomItActivateSnipOcr();
         break;
+    case ZoomItCommand::SnipDictate:
+        post_hotkey(SNIP_DICTATE_HOTKEY);
+        Trace::ZoomItActivateSnipDictate();
+        break;
     case ZoomItCommand::Record:
         post_hotkey(RECORD_HOTKEY);
         Trace::ZoomItActivateRecord();
@@ -11343,6 +11715,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     if (!g_hWndMain )
         return FALSE;
 
+    // Remove snip temp files left behind by earlier sessions.
+    CleanupSnipTempFiles();
+
 #ifdef __ZOOMIT_POWERTOYS__
     HANDLE m_reload_settings_event_handle = NULL;
     HANDLE m_exit_event_handle = NULL;
@@ -11352,6 +11727,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
     HANDLE m_live_zoom_event_handle = NULL;
     HANDLE m_snip_event_handle = NULL;
     HANDLE m_snip_ocr_event_handle = NULL;
+    HANDLE m_snip_dictate_event_handle = NULL;
     HANDLE m_record_event_handle = NULL;
     std::thread m_event_triggers_thread;
 
@@ -11365,13 +11741,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         m_live_zoom_event_handle = CreateEventW(nullptr, false, false, CommonSharedConstants::ZOOMIT_LIVEZOOM_EVENT);
         m_snip_event_handle = CreateEventW(nullptr, false, false, CommonSharedConstants::ZOOMIT_SNIP_EVENT);
         m_snip_ocr_event_handle = CreateEventW(nullptr, false, false, CommonSharedConstants::ZOOMIT_SNIPOCR_EVENT);
+        m_snip_dictate_event_handle = CreateEventW(nullptr, false, false, CommonSharedConstants::ZOOMIT_SNIPDICTATE_EVENT);
         m_record_event_handle = CreateEventW(nullptr, false, false, CommonSharedConstants::ZOOMIT_RECORD_EVENT);
-        if (!m_reload_settings_event_handle || !m_exit_event_handle || !m_zoom_event_handle || !m_draw_event_handle || !m_break_event_handle || !m_live_zoom_event_handle || !m_snip_event_handle || !m_snip_ocr_event_handle || !m_record_event_handle)
+        if (!m_reload_settings_event_handle || !m_exit_event_handle || !m_zoom_event_handle || !m_draw_event_handle || !m_break_event_handle || !m_live_zoom_event_handle || !m_snip_event_handle || !m_snip_ocr_event_handle || !m_snip_dictate_event_handle || !m_record_event_handle)
         {
             Logger::warn(L"Failed to create events. {}", get_last_error_or_default(GetLastError()));
             return 1;
         }
-        const std::array<HANDLE, 9> event_handles{
+        const std::array<HANDLE, 10> event_handles{
             m_reload_settings_event_handle,
             m_exit_event_handle,
             m_zoom_event_handle,
@@ -11380,6 +11757,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
             m_live_zoom_event_handle,
             m_snip_event_handle,
             m_snip_ocr_event_handle,
+            m_snip_dictate_event_handle,
             m_record_event_handle,
         };
         const DWORD handle_count = static_cast<DWORD>(event_handles.size());
@@ -11440,6 +11818,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
                     ZoomIt_DispatchCommand(ZoomItCommand::SnipOcr);
                     break;
                 case WAIT_OBJECT_0 + 8:
+                    ZoomIt_DispatchCommand(ZoomItCommand::SnipDictate);
+                    break;
+                case WAIT_OBJECT_0 + 9:
                     ZoomIt_DispatchCommand(ZoomItCommand::Record);
                     break;
                 default: break;
@@ -11457,6 +11838,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         }
     }
     int retCode = (int) msg.wParam;
+
+    // Tears down the paste chaperone's hook thread if a sequence is still armed.
+    PasteChaperone::Cancel();
 
     g_running = FALSE;
 
@@ -11478,6 +11862,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance
         CloseHandle(m_live_zoom_event_handle);
         CloseHandle(m_snip_event_handle);
         CloseHandle(m_snip_ocr_event_handle);
+        CloseHandle(m_snip_dictate_event_handle);
         CloseHandle(m_record_event_handle);
         m_event_triggers_thread.join();
     }

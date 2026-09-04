@@ -19,6 +19,9 @@ DWORD	g_RecordToggleKey = ((HOTKEYF_CONTROL) << 8) | '5';
 DWORD   g_SnipToggleKey = ((HOTKEYF_CONTROL) << 8) | '6';
 DWORD   g_SnipPanoramaToggleKey = ((HOTKEYF_CONTROL) << 8) | '8';
 DWORD   g_SnipOcrToggleKey = ((HOTKEYF_CONTROL | HOTKEYF_ALT) << 8) | '6';
+// Unassigned by default. Dictation is normally armed by tapping the dictation key during
+// the snip drag; this optional hotkey starts a snip that is already listening.
+DWORD   g_SnipDictateToggleKey = 0;
 
 DWORD	g_ShowExpiredTime = 1;
 DWORD	g_SliderZoomLevel = 3;
@@ -63,6 +66,21 @@ DWORD	g_TrimDialogWidth = 0;  // 0 means use default; stored in screen pixels
 DWORD	g_TrimDialogHeight = 0; // 0 means use default; stored in screen pixels
 DWORD	g_TrimDialogVolume = 70; // 0-100 volume level for trim dialog preview
 
+// Snip dictation. Disabled by default: it opens the microphone, so it is only
+// ever active once the user has explicitly turned it on.
+BOOLEAN g_SnipDictateEnabled = FALSE;
+// When set, the regular snip hotkey dictates too, instead of requiring the
+// dedicated dictation hotkey.
+BOOLEAN g_SnipDictateOnSnip = FALSE;
+// Milliseconds to keep listening after the mouse button is released, so that
+// trailing words are still transcribed.
+DWORD   g_SnipDictateGrace = 800;
+// Bit mask of SnipClipboardFormats.
+DWORD   g_SnipDictateClipboardFormats = 0x1F;
+// Optional text placed in front of the transcription, for example to frame the
+// annotation as an instruction to an AI assistant.
+TCHAR   g_SnipDictatePrefix[MAX_PATH] = {0};
+
 REG_SETTING RegSettings[] = {
     { L"ToggleKey", SETTING_TYPE_DWORD, 0, &g_ToggleKey, static_cast<DOUBLE>(g_ToggleKey) },
     { L"LiveZoomToggleKey", SETTING_TYPE_DWORD, 0, &g_LiveZoomToggleKey, static_cast<DOUBLE>(g_LiveZoomToggleKey) },
@@ -71,6 +89,7 @@ REG_SETTING RegSettings[] = {
     { L"SnipToggleKey", SETTING_TYPE_DWORD, 0, &g_SnipToggleKey, static_cast<DOUBLE>(g_SnipToggleKey) },
     { L"SnipPanoramaToggleKey", SETTING_TYPE_DWORD, 0, &g_SnipPanoramaToggleKey, static_cast<DOUBLE>(g_SnipPanoramaToggleKey) },
     { L"SnipOcrToggleKey", SETTING_TYPE_DWORD, 0, &g_SnipOcrToggleKey, static_cast<DOUBLE>(g_SnipOcrToggleKey) },
+    { L"SnipDictateToggleKey", SETTING_TYPE_DWORD, 0, &g_SnipDictateToggleKey, static_cast<DOUBLE>(g_SnipDictateToggleKey) },
     { L"PenColor", SETTING_TYPE_DWORD, 0, &g_PenColor, static_cast<DOUBLE>(g_PenColor) },
     { L"PenWidth", SETTING_TYPE_DWORD, 0, &g_RootPenWidth, static_cast<DOUBLE>(g_RootPenWidth) },
     { L"OptionsShown", SETTING_TYPE_BOOLEAN, 0, &g_OptionsShown, static_cast<DOUBLE>(g_OptionsShown) },
@@ -114,5 +133,10 @@ REG_SETTING RegSettings[] = {
     { L"TrimDialogWidth", SETTING_TYPE_DWORD, 0, &g_TrimDialogWidth, static_cast<DOUBLE>(0) },
     { L"TrimDialogHeight", SETTING_TYPE_DWORD, 0, &g_TrimDialogHeight, static_cast<DOUBLE>(0) },
     { L"TrimDialogVolume", SETTING_TYPE_DWORD, 0, &g_TrimDialogVolume, static_cast<DOUBLE>(g_TrimDialogVolume) },
+    { L"SnipDictateEnabled", SETTING_TYPE_BOOLEAN, 0, &g_SnipDictateEnabled, static_cast<DOUBLE>(g_SnipDictateEnabled) },
+    { L"SnipDictateOnSnip", SETTING_TYPE_BOOLEAN, 0, &g_SnipDictateOnSnip, static_cast<DOUBLE>(g_SnipDictateOnSnip) },
+    { L"SnipDictateGrace", SETTING_TYPE_DWORD, 0, &g_SnipDictateGrace, static_cast<DOUBLE>(g_SnipDictateGrace) },
+    { L"SnipDictateClipboardFormats", SETTING_TYPE_DWORD, 0, &g_SnipDictateClipboardFormats, static_cast<DOUBLE>(g_SnipDictateClipboardFormats) },
+    { L"SnipDictatePrefix", SETTING_TYPE_STRING, sizeof(g_SnipDictatePrefix), g_SnipDictatePrefix, static_cast<DOUBLE>(0) },
     { NULL, SETTING_TYPE_DWORD, 0, NULL, static_cast<DOUBLE>(0) }
 };

@@ -293,8 +293,7 @@
                             </tkcontrols:SettingsCard>
                             <tkcontrols:SettingsCard
                                 Name="ZoomItRecordMicrophone"
-                                x:Uid="ZoomIt_Record_Microphone"
-                                Visibility="{x:Bind ViewModel.RecordCaptureAudio, Mode=OneWay}">
+                                x:Uid="ZoomIt_Record_Microphone">
                                 <ComboBox
                                     MinWidth="{StaticResource SettingActionControlMinWidth}"
                                     DisplayMemberPath="Item2"
@@ -336,6 +335,12 @@
                         IsExpanded="True">
                         <controls:ShortcutControl MinWidth="{StaticResource SettingActionControlMinWidth}" HotkeySettings="{x:Bind ViewModel.SnipOcrToggleKey, Mode=TwoWay}" />
                     </tkcontrols:SettingsExpander>
+                    <tkcontrols:SettingsCard
+                        Name="ZoomItSnipDictate"
+                        x:Uid="ZoomIt_SnipDictate"
+                        HeaderIcon="{ui:FontIcon Glyph=&#xE720;}">
+                        <ToggleSwitch x:Uid="ToggleSwitch" IsOn="{x:Bind ViewModel.SnipDictateEnabled, Mode=TwoWay}" />
+                    </tkcontrols:SettingsCard>
                 </controls:SettingsGroup>
             </StackPanel>
         </controls:SettingsPageControl.ModuleContent>

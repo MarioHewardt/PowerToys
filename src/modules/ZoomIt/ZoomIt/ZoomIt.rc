@@ -273,13 +273,13 @@ BEGIN
     LTEXT           "To crop the portion of the screen that will be recorded, enter the hotkey with the Shift key in the opposite mode. ",IDC_STATIC,7,35,245,19
     LTEXT           "To record a specific window, enter the hotkey with the Alt key in the opposite mode.",IDC_STATIC,7,55,251,19
     CONTROL         "Capture &system audio",IDC_CAPTURE_SYSTEM_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,149,83,10
-    CONTROL         "&Capture audio input:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,161,83,10
-    COMBOBOX        IDC_MICROPHONE,81,176,152,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Microphone:",IDC_MICROPHONE_LABEL,32,178,47,8
+    CONTROL         "Include microphone in &recording:",IDC_CAPTURE_AUDIO,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,161,126,10
+    COMBOBOX        IDC_MICROPHONE,137,176,116,30,CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Microphone for recording and dictation:",IDC_MICROPHONE_LABEL,7,178,128,8
     PUSHBUTTON      "&Trim",IDC_TRIM_FILE,207,209,53,14
 END
 
-SNIP DIALOGEX 0, 0, 260, 80
+SNIP DIALOGEX 0, 0, 260, 132
 STYLE DS_SETFONT | DS_FIXEDSYS | DS_CONTROL | WS_CHILD | WS_CLIPSIBLINGS | WS_SYSMENU
 FONT 8, "MS Shell Dlg", 400, 0, 0x1
 BEGIN
@@ -289,6 +289,8 @@ BEGIN
     LTEXT           "Copy text from the selected region to the clipboard:",IDC_STATIC,7,50,230,10
     LTEXT           "Text Toggle:",IDC_STATIC,7,65,55,8
     CONTROL         "",IDC_SNIP_OCR_HOTKEY,"msctls_hotkey32",WS_BORDER | WS_TABSTOP,67,63,80,12
+    LTEXT           "While dragging a snip selection, press Space to dictate. The transcription is placed on the clipboard with the image, so one paste delivers both. Dictation uses the microphone selected on the Record page.",IDC_STATIC,7,84,245,27
+    CONTROL         "&Enable snip with dictation:",IDC_SNIP_DICTATE_ENABLED,"Button",BS_AUTOCHECKBOX | BS_LEFTTEXT | WS_TABSTOP,7,116,100,10
 END
 
 PANORAMA DIALOGEX 0, 0, 260, 105
@@ -531,4 +533,3 @@ END
 #include "binres.rc"
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

@@ -80,6 +80,11 @@
 #define IDC_SNIP_HOTKEY                 1060
 #define IDC_SNIP_OCR_HOTKEY             1112
 #define IDC_SNIP_PANORAMA_HOTKEY        1114
+#define IDC_SNIP_DICTATE_HOTKEY         1115
+#define IDC_SNIP_DICTATE_ENABLED        1116
+#define IDC_SNIP_DICTATE_ON_SNIP        1117
+#define IDC_SNIP_DICTATE_PREFIX         1118
+#define IDC_SNIP_DICTATE_GRACE          1119
 #define IDC_CAPTURE_AUDIO               1061
 #define IDC_MICROPHONE                  1062
 #define IDC_PEN_CONTROL                 1063
@@ -121,6 +126,7 @@
 #define IDC_RECORD_HOTKEY               40007
 #define IDC_COPY_CROP                   40008
 #define IDC_COPY_OCR                    40014
+#define IDC_COPY_CROP_DICTATE           40015
 #define IDC_SAVE_CROP                   40009
 #define IDC_DEMOTYPE_HOTKEY             40011
 
@@ -129,8 +135,8 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        120
-#define _APS_NEXT_COMMAND_VALUE         40015
-#define _APS_NEXT_CONTROL_VALUE         1115
+#define _APS_NEXT_COMMAND_VALUE         40016
+#define _APS_NEXT_CONTROL_VALUE         1121
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif
