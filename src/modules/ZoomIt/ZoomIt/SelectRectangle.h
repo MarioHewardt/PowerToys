@@ -20,6 +20,7 @@ public:
     BYTE Alpha() const { return m_alpha; }
     void MinSize( int minSize ) { m_minSize = minSize; }
     int MinSize() const { return m_minSize; }
+    void RetainDimmedExteriorAfterSelection( bool retain ) { m_retainDimmedExterior = retain; }
     RECT SelectedRect() const { return m_selectedRect; }
     bool IsActive() const { return m_window != nullptr; }
 
@@ -65,6 +66,7 @@ private:
     bool m_setClip{ false };
     bool m_stopping{ false };
     bool m_dragStarted{ false };
+    bool m_retainDimmedExterior{ false };
     POINT m_startPoint{};
     wil::unique_hwnd m_window;
 
