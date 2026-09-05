@@ -141,6 +141,11 @@ bool ZoomAnimation::IsActive() const
     return m_active;
 }
 
+bool ZoomAnimation::ShouldSmoothImage(bool smoothImageEnabled) const
+{
+    return smoothImageEnabled && !m_active;
+}
+
 float ZoomAnimation::Target() const
 {
     return m_targetZoom;

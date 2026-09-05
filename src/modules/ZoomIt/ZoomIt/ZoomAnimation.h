@@ -14,6 +14,7 @@ public:
     void Stop(float zoomLevel);
 
     bool IsActive() const;
+    bool ShouldSmoothImage(bool smoothImageEnabled) const;
     float Target() const;
 
 private:

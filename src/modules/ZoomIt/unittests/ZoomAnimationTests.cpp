@@ -9,6 +9,30 @@ namespace ZoomAnimationTests
     TEST_CLASS(ZoomAnimationStateTests)
     {
     public:
+        TEST_METHOD(SmoothingIsDeferredUntilAnimationCompletes)
+        {
+            ZoomAnimation animation;
+            animation.Start(1.0f, 4.0f, 100, 180);
+            Assert::IsFalse(animation.ShouldSmoothImage(true));
+            animation.Sample(200);
+            Assert::IsFalse(animation.ShouldSmoothImage(true));
+            animation.Sample(280);
+            Assert::IsTrue(animation.ShouldSmoothImage(true));
+            Assert::IsFalse(animation.ShouldSmoothImage(false));
+        }
+
+        TEST_METHOD(RetargetedAnimationDefersSmoothingAndStopRestoresPreference)
+        {
+            ZoomAnimation animation;
+            animation.Start(1.0f, 4.0f, 100, 180);
+            animation.Retarget(8.0f, 200, 180);
+            animation.Sample(280);
+            Assert::IsFalse(animation.ShouldSmoothImage(true));
+            animation.Stop(8.0f);
+            Assert::IsTrue(animation.ShouldSmoothImage(true));
+            Assert::IsFalse(animation.ShouldSmoothImage(false));
+        }
+
         TEST_METHOD(CompletesAtExactTarget)
         {
             ZoomAnimation animation;

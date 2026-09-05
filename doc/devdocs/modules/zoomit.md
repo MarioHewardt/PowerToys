@@ -20,6 +20,10 @@ ZoomIt is a screen zoom and annotation tool originally from Microsoft's Sysinter
 
 ZoomIt runs in the background and is activated via customizable hotkeys.
 
+Live Zoom disables bitmap smoothing while the zoom scale is animating to avoid temporal
+shimmer. The user's **Smooth image** setting is restored on the final frame or when an
+animation is stopped by a direct zoom-level change.
+
 ## Special Integration Considerations
 
 Unlike other PowerToys modules, ZoomIt has some unique integration aspects:

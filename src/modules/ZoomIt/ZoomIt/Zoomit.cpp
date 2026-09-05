@@ -10840,7 +10840,7 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     static float	zoomLevel;
     static float	zoomTelescopeTarget;
     static ZoomAnimation zoomAnimation;
-    static BOOLEAN animationSmoothingForced = FALSE;
+    static BOOLEAN animationSmoothingDisabled = FALSE;
     static BOOL		dwmEnabled = FALSE;
     static BOOLEAN	startedInPresentationMode = FALSE;
     MAGTRANSFORM matrix;
@@ -10887,7 +10887,7 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
     case WM_SHOWWINDOW:
         if( wParam == TRUE ) {
 
-            animationSmoothingForced = FALSE;
+            animationSmoothingDisabled = FALSE;
             if( !g_fullScreenWorkaround && pMagSetLensUseBitmapSmoothing )
                 pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, g_SmoothImage );
 
@@ -10955,9 +10955,9 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         } else {
 
             KillTimer( hWnd, 0 );
-            if( animationSmoothingForced ) {
+            if( animationSmoothingDisabled ) {
 
-                animationSmoothingForced = FALSE;
+                animationSmoothingDisabled = FALSE;
                 if( pMagSetLensUseBitmapSmoothing )
                     pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, g_SmoothImage );
             }
@@ -11012,19 +11012,19 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             moveHeight = sourceRectHeight/LIVEZOOM_MOVE_REGIONS;
             if( zoomAnimation.IsActive() ) {
 
-                // Force interpolated magnification while the scale changes so sub-pixel motion is smooth, not blocky.
-                if( !g_fullScreenWorkaround && !animationSmoothingForced ) {
+                // Filtering a changing scale causes temporal shimmer. Restore it on the final frame.
+                if( !g_fullScreenWorkaround && !animationSmoothingDisabled ) {
 
-                    animationSmoothingForced = TRUE;
+                    animationSmoothingDisabled = TRUE;
                     if( pMagSetLensUseBitmapSmoothing )
-                        pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, TRUE );
+                        pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, zoomAnimation.ShouldSmoothImage( g_SmoothImage ) );
                 }
                 zoomLevel = zoomAnimation.Sample( GetTickCount64() );
-                if( animationSmoothingForced && !zoomAnimation.IsActive() ) {
+                if( animationSmoothingDisabled && !zoomAnimation.IsActive() ) {
 
-                    animationSmoothingForced = FALSE;
+                    animationSmoothingDisabled = FALSE;
                     if( pMagSetLensUseBitmapSmoothing )
-                        pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, g_SmoothImage );
+                        pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, zoomAnimation.ShouldSmoothImage( g_SmoothImage ) );
                 }
                 // Time to exit zoom mode?
                 if( zoomTelescopeTarget == 1 && zoomLevel == 1 ) {
@@ -11269,9 +11269,9 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
         break;
     case WM_DESTROY:
-        if( animationSmoothingForced && pMagSetLensUseBitmapSmoothing )
+        if( animationSmoothingDisabled && pMagSetLensUseBitmapSmoothing )
             pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, g_SmoothImage );
-        animationSmoothingForced = FALSE;
+        animationSmoothingDisabled = FALSE;
         g_hWndLiveZoom = NULL;
         break;
 
@@ -11331,6 +11331,11 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             zoomLevel = static_cast<float>(wParam);
             zoomTelescopeTarget = zoomLevel;
             zoomAnimation.Stop( zoomLevel );
+            if( animationSmoothingDisabled ) {
+                animationSmoothingDisabled = FALSE;
+                if( pMagSetLensUseBitmapSmoothing )
+                    pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, zoomAnimation.ShouldSmoothImage( g_SmoothImage ) );
+            }
             matrix.v[0][0] = zoomLevel;
             matrix.v[0][2] = (static_cast<float>(-lastSourceRect.left) * static_cast<float>(wParam));
 
