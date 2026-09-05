@@ -410,6 +410,19 @@ void OutputDebug(const TCHAR* format, ...)
 #endif
 }
 
+//----------------------------------------------------------------------
+//
+// IsLiveZoomActive
+//
+// The live zoom window is kept cached while hidden, so a non-NULL handle
+// does not mean live zoom is on screen.
+//
+//----------------------------------------------------------------------
+bool IsLiveZoomActive()
+{
+    return g_hWndLiveZoom != nullptr && IsWindowVisible( g_hWndLiveZoom );
+}
+
 const wchar_t* HotkeyIdToString( WPARAM hotkeyId )
 {
     switch( hotkeyId )
@@ -6384,7 +6397,7 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
 
         recordingStarted = (g_GifRecordingSession != nullptr);
 
-        if( g_hWndLiveZoom != NULL )
+        if( IsLiveZoomActive() )
             g_GifRecordingSession->EnableCursorCapture( false );
 
         if (recordingStarted)
@@ -6427,7 +6440,7 @@ winrt::fire_and_forget StartRecordingAsync( HWND hWnd, LPRECT rcCrop, HWND hWndR
 
         recordingStarted = (g_RecordingSession != nullptr);
 
-        if( g_hWndLiveZoom != NULL )
+        if( IsLiveZoomActive() )
             g_RecordingSession->EnableCursorCapture( false );
 
         if (recordingStarted)
@@ -7789,12 +7802,12 @@ LRESULT APIENTRY MainWndProc(
                 RECT savedClip = {};
 
                 // Handle the cursor for live zoom and static zoom modes.
-                if( ( g_hWndLiveZoom != nullptr ) || ( g_Zoomed == TRUE ) )
+                if( IsLiveZoomActive() || ( g_Zoomed == TRUE ) )
                 {
                     GetCursorPos( &savedPoint );
                     UpdateMonitorInfo( savedPoint, &monInfo );
                 }
-                if( g_hWndLiveZoom != nullptr )
+                if( IsLiveZoomActive() )
                 {
                     // Hide the magnified cursor.
                     SendMessage( g_hWndLiveZoom, WM_USER_MAGNIFY_CURSOR, FALSE, 0 );
@@ -7825,11 +7838,11 @@ LRESULT APIENTRY MainWndProc(
                 }
 
                 // This call blocks with a message loop while cropping.
-                auto canceled = !g_SelectRectangle.Start( ( g_hWndLiveZoom != nullptr ) ? g_hWndLiveZoom : hWnd );
+                auto canceled = !g_SelectRectangle.Start( IsLiveZoomActive() ? g_hWndLiveZoom : hWnd );
                 g_RecordCropping = FALSE;
 
                 // Restore the cursor if applicable.
-                if( g_hWndLiveZoom != nullptr )
+                if( IsLiveZoomActive() )
                 {
                     // Hide the system cursor.
                     if ( pMagShowSystemCursor != nullptr )
@@ -7865,7 +7878,7 @@ LRESULT APIENTRY MainWndProc(
                     break;
                 }
 
-                g_SelectRectangle.UpdateOwner( ( g_hWndLiveZoom != nullptr ) ? g_hWndLiveZoom : hWnd );
+                g_SelectRectangle.UpdateOwner( IsLiveZoomActive() ? g_hWndLiveZoom : hWnd );
                 cropRc = g_SelectRectangle.SelectedRect();
             }
             else
@@ -7978,7 +7991,7 @@ LRESULT APIENTRY MainWndProc(
 #endif // __ZOOMIT_POWERTOYS__
 
                     // Hide the cursor before capturing if in live zoom
-                    if( g_hWndLiveZoom != nullptr )
+                    if( IsLiveZoomActive() )
                     {
                         OutputDebug(L"Hide cursor\n");
                         SendMessage( g_hWndLiveZoom, WM_USER_MAGNIFY_CURSOR, FALSE, 0 );
@@ -10888,6 +10901,12 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         if( wParam == TRUE ) {
 
             animationSmoothingDisabled = FALSE;
+            KillTimer( hWnd, 1 );
+
+            // The cached control relinquishes cursor rendering while hidden. Restore it before live zoom is shown.
+            if( !g_fullScreenWorkaround )
+                SendMessage( hWnd, WM_USER_MAGNIFY_CURSOR, TRUE, 0 );
+
             if( !g_fullScreenWorkaround && pMagSetLensUseBitmapSmoothing )
                 pMagSetLensUseBitmapSmoothing( g_hWndLiveZoomMag, g_SmoothImage );
 
@@ -10965,17 +10984,20 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
             if( g_RecordToggle )
                 g_RecordingSession->EnableCursorCapture();
 
-            if( !g_fullScreenWorkaround )
-                if( pMagShowSystemCursor ) pMagShowSystemCursor( TRUE );
+            if( !g_fullScreenWorkaround ) {
 
-            // Reset the timer to expire two hours from now
+                // Stop the magnifier control from retaining ownership of the cursor while its expensive surfaces
+                // remain resident. Destroying the control also releases the cursor, but makes the next activation cold.
+                SendMessage( hWnd, WM_USER_MAGNIFY_CURSOR, FALSE, 0 );
+                if( pMagShowSystemCursor ) pMagShowSystemCursor( TRUE );
+            }
+
+            // Keep the magnifier control resident on current Windows. Re-creating it costs ~200ms while warm and can
+            // take much longer after its ~76MB of fullscreen surfaces have left the standby list.
+            KillTimer( hWnd, 1 );
             if( g_OsVersion < WIN7_VERSION && !IsPresentationMode()) {
 
-                KillTimer( hWnd, 1 );
                 SetTimer( hWnd, 1, LIVEZOOM_WINDOW_TIMEOUT, NULL );
-            } else {
-
-                DestroyWindow( hWnd );
             }
             UnregisterHotKey( hWnd, 0 );
             UnregisterHotKey( hWnd, 1 );
@@ -11161,14 +11183,7 @@ LRESULT CALLBACK LiveZoomWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
                 else {
 
 #endif
-                if( g_OsVersion < WIN7_VERSION ) {
-
-                    ShowWindow( hWnd, SW_HIDE );
-
-                } else {
-
-                    DestroyWindow( hWnd );
-                }
+                ShowWindow( hWnd, SW_HIDE );
             }
 #if WINDOWS_CURSOR_RECORDING_WORKAROUND
             }
