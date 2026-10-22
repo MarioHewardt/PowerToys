@@ -1202,6 +1202,8 @@ VideoRecordingSession::VideoRecordingSession(
         winrt::MediaEncodingSubtypes::Bgra8(),
         static_cast<uint32_t>(m_rcCrop.right - m_rcCrop.left),
         static_cast<uint32_t>(m_rcCrop.bottom - m_rcCrop.top));
+    properties.FrameRate().Numerator(frameRate);
+    properties.FrameRate().Denominator(1);
     m_videoDescriptor = winrt::VideoStreamDescriptor(properties);
 
     m_stream = stream;
